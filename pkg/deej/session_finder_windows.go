@@ -1,17 +1,50 @@
 package deej
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
-	"syscall"
 	"time"
 	"unsafe"
 
+	"syscall"
+
 	ole "github.com/go-ole/go-ole"
-	wca "github.com/moutend/go-wca"
+	"github.com/moutend/go-wca/pkg/wca"
 	"go.uber.org/zap"
 )
+
+type NotificationClient struct {
+	vtbl *NotificationClientVtbl
+}
+
+type NotificationClientVtbl struct {
+	QueryInterface         uintptr
+	AddRef                 uintptr
+	Release                uintptr
+	OnDeviceStateChanged   uintptr
+	OnDeviceAdded          uintptr
+	OnDeviceRemoved        uintptr
+	OnDefaultDeviceChanged uintptr
+	OnPropertyValueChanged uintptr
+}
+
+func NewNotificationClient(sf *wcaSessionFinder) *NotificationClient {
+	client := &NotificationClient{
+		vtbl: &NotificationClientVtbl{
+			QueryInterface:         syscall.NewCallback(sf.noopCallback),
+			AddRef:                 syscall.NewCallback(sf.noopCallback),
+			Release:                syscall.NewCallback(sf.noopCallback),
+			OnDeviceStateChanged:   syscall.NewCallback(sf.noopCallback),
+			OnDeviceAdded:          syscall.NewCallback(sf.noopCallback),
+			OnDeviceRemoved:        syscall.NewCallback(sf.noopCallback),
+			OnPropertyValueChanged: syscall.NewCallback(sf.noopCallback),
+			OnDefaultDeviceChanged: syscall.NewCallback(sf.defaultDeviceChangedCallback),
+		},
+	}
+	return client
+}
 
 type wcaSessionFinder struct {
 	logger        *zap.SugaredLogger
@@ -27,6 +60,16 @@ type wcaSessionFinder struct {
 	// our master input and output sessions
 	masterOut *masterSession
 	masterIn  *masterSession
+
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+type audioDevice struct {
+	endpoint     *wca.IMMDevice
+	description  string
+	friendlyName string
+	dataFlow     uint32
 }
 
 const (
@@ -42,103 +85,155 @@ const (
 	deviceSessionFormat = "device.%s"
 )
 
+const (
+	comSFalse             = 0x00000001
+	systemSoundsErrorCode = 143196173
+	maxRetries            = 3
+	retryDelay            = 100 * time.Millisecond
+)
+
+func withRetry(operation func() error) error {
+	var lastErr error
+	for range maxRetries {
+		if err := operation(); err != nil {
+			lastErr = err
+			time.Sleep(retryDelay)
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("operation failed after %d retries: %w", maxRetries, lastErr)
+}
+
 func newSessionFinder(logger *zap.SugaredLogger) (SessionFinder, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Always clean up the context if we return an error
+	var cleanup bool
+	defer func() {
+		if cleanup {
+			cancel()
+		}
+	}()
+
+	eventCtx := ole.NewGUID(myteriousGUID)
+	if eventCtx == nil {
+		cleanup = true
+		return nil, fmt.Errorf("failed to create event context GUID")
+	}
+
 	sf := &wcaSessionFinder{
 		logger:        logger.Named("session_finder"),
 		sessionLogger: logger.Named("sessions"),
-		eventCtx:      ole.NewGUID(myteriousGUID),
+		eventCtx:      eventCtx,
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 
-	sf.logger.Debug("Created WCA session finder instance")
+	// Start connection monitoring
+	sf.monitorConnection()
 
+	sf.logger.Debug("Created WCA session finder instance")
 	return sf, nil
 }
 
-func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
-	sessions := []Session{}
+func (sf *wcaSessionFinder) initializeCOM() error {
+	err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED)
+	if err == nil {
+		return nil
+	}
 
-	// we must call this every time we're about to list devices, i think. could be wrong
-	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
-
-		// if the error is "Incorrect function" that corresponds to 0x00000001,
-		// which represents E_FALSE in COM error handling. this is fine for this function,
-		// and just means that the call was redundant.
-		const eFalse = 1
-		oleError := &ole.OleError{}
-
-		if errors.As(err, &oleError) {
-			if oleError.Code() == eFalse {
-				sf.logger.Warn("CoInitializeEx failed with E_FALSE due to redundant invocation")
-			} else {
-				sf.logger.Warnw("Failed to call CoInitializeEx",
-					"isOleError", true,
-					"error", err,
-					"oleError", oleError)
-
-				return nil, fmt.Errorf("call CoInitializeEx: %w", err)
+	if oleErr, ok := err.(*ole.OleError); ok {
+		switch oleErr.Code() {
+		case comSFalse: // S_FALSE
+			sf.logger.Debug("COM already initialized")
+			return nil
+		case ole.E_INVALIDARG:
+			sf.logger.Debug("Retrying COM initialization with single-threaded model")
+			if err := ole.CoInitializeEx(0, ole.COINIT_MULTITHREADED); err != nil {
+				return fmt.Errorf("failed to initialize COM in single-threaded mode: %w", err)
 			}
-		} else {
-			sf.logger.Warnw("Failed to call CoInitializeEx",
-				"isOleError", false,
-				"error", err,
-				"oleError", nil)
-
-			return nil, fmt.Errorf("call CoInitializeEx: %w", err)
-		}
-
-	}
-	defer ole.CoUninitialize()
-
-	// ensure we have a device enumerator
-	if err := sf.getDeviceEnumerator(); err != nil {
-		sf.logger.Warnw("Failed to get device enumerator", "error", err)
-		return nil, fmt.Errorf("get device enumerator: %w", err)
-	}
-
-	// get the currently active default output and input devices.
-	// please note that this can return a nil defaultInputEndpoint, in case there are no input devices connected.
-	// you must check it for non-nil
-	defaultOutputEndpoint, defaultInputEndpoint, err := sf.getDefaultAudioEndpoints()
-	if err != nil {
-		sf.logger.Warnw("Failed to get default audio endpoints", "error", err)
-		return nil, fmt.Errorf("get default audio endpoints: %w", err)
-	}
-	defer defaultOutputEndpoint.Release()
-
-	if defaultInputEndpoint != nil {
-		defer defaultInputEndpoint.Release()
-	}
-
-	// receive notifications whenever the default device changes (only do this once)
-	if sf.mmNotificationClient == nil {
-		if err := sf.registerDefaultDeviceChangeCallback(); err != nil {
-			sf.logger.Warnw("Failed to register default device change callback", "error", err)
-			return nil, fmt.Errorf("register default device change callback: %w", err)
+			return nil
 		}
 	}
 
-	// get the master output session
+	return fmt.Errorf("failed to initialize COM: %w", err)
+}
+
+func (sf *wcaSessionFinder) setupMasterSessions(defaultOutputEndpoint, defaultInputEndpoint *wca.IMMDevice) ([]Session, error) {
+	var sessions []Session
+	var err error
+
 	sf.masterOut, err = sf.getMasterSession(defaultOutputEndpoint, masterSessionName, masterSessionName)
 	if err != nil {
 		sf.logger.Warnw("Failed to get master audio output session", "error", err)
 		return nil, fmt.Errorf("get master audio output session: %w", err)
 	}
-
 	sessions = append(sessions, sf.masterOut)
 
-	// get the master input session, if a default input device exists
 	if defaultInputEndpoint != nil {
 		sf.masterIn, err = sf.getMasterSession(defaultInputEndpoint, inputSessionName, inputSessionName)
 		if err != nil {
 			sf.logger.Warnw("Failed to get master audio input session", "error", err)
 			return nil, fmt.Errorf("get master audio input session: %w", err)
 		}
-
 		sessions = append(sessions, sf.masterIn)
 	}
 
-	// enumerate all devices and make their "master" sessions bindable by friendly name;
-	// for output devices, this is also where we enumerate process sessions
+	return sessions, nil
+}
+
+func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
+	cleanup := func(sessions []Session) {
+		for _, session := range sessions {
+			session.Release()
+		}
+	}
+
+	sessions, err := sf.getAllSessionsInternal()
+	if err != nil {
+		cleanup(sessions)
+		return nil, err
+	}
+
+	return sessions, nil
+}
+
+func (sf *wcaSessionFinder) getAllSessionsInternal() ([]Session, error) {
+	if err := sf.initializeCOM(); err != nil {
+		return nil, fmt.Errorf("initialize COM: %w", err)
+	}
+
+	// Check connection state and attempt to connect if needed
+	if !sf.isConnected() {
+		if err := sf.getDeviceEnumerator(); err != nil {
+			return nil, fmt.Errorf("get device enumerator: %w", err)
+		}
+
+		if err := sf.registerDefaultDeviceChangeCallback(); err != nil {
+			return nil, fmt.Errorf("register device notifications: %w", err)
+		}
+	}
+
+	defaultOutputEndpoint, defaultInputEndpoint, err := sf.getDefaultAudioEndpoints()
+	if err != nil {
+		sf.logger.Warnw("Failed to get default audio endpoints", "error", err)
+		return nil, fmt.Errorf("get default audio endpoints: %w", err)
+	}
+	defer func() {
+		if defaultOutputEndpoint != nil {
+			defaultOutputEndpoint.Release()
+		}
+		if defaultInputEndpoint != nil {
+			defaultInputEndpoint.Release()
+		}
+	}()
+
+	sessions, err := sf.setupMasterSessions(defaultOutputEndpoint, defaultInputEndpoint)
+	if err != nil {
+		return nil, err
+	}
+
 	if err := sf.enumerateAndAddSessions(&sessions); err != nil {
 		sf.logger.Warnw("Failed to enumerate device sessions", "error", err)
 		return nil, fmt.Errorf("enumerate device sessions: %w", err)
@@ -148,14 +243,29 @@ func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
 }
 
 func (sf *wcaSessionFinder) Release() error {
+	// Cancel context first to stop background tasks
+	sf.cancel()
 
-	// skip unregistering the mmnotificationclient, as it's not implemented in go-wca
-	if sf.mmDeviceEnumerator != nil {
+	if sf.isConnected() {
+		if sf.mmNotificationClient != nil {
+			_ = sf.mmDeviceEnumerator.UnregisterEndpointNotificationCallback(sf.mmNotificationClient)
+			sf.mmNotificationClient = nil
+		}
+
 		sf.mmDeviceEnumerator.Release()
+		sf.mmDeviceEnumerator = nil
 	}
 
-	sf.logger.Debug("Released WCA session finder instance")
+	// Release master sessions if they exist
+	if sf.masterOut != nil {
+		sf.masterOut.Release()
+	}
+	if sf.masterIn != nil {
+		sf.masterIn.Release()
+	}
 
+	ole.CoUninitialize()
+	sf.logger.Debug("Released WCA session finder instance")
 	return nil
 }
 
@@ -198,20 +308,16 @@ func (sf *wcaSessionFinder) getDefaultAudioEndpoints() (*wca.IMMDevice, *wca.IMM
 	return mmOutDevice, mmInDevice, nil
 }
 
+// NOTE: Updated to work with the new go-wca package v0.3.0
+// registerDefaultDeviceChangeCallback registers the default device change callback
+// with the MMDeviceEnumerator. This is called when the default audio device
+// changes, and it will mark the master sessions as stale.
+// This is a workaround for the fact that the default device change callback
+// is not implemented in go-wca. The callback is called from the
+// IMMNotificationClient interface, which is implemented in the wca package.
 func (sf *wcaSessionFinder) registerDefaultDeviceChangeCallback() error {
-	sf.mmNotificationClient = &wca.IMMNotificationClient{}
-	sf.mmNotificationClient.VTable = &wca.IMMNotificationClientVtbl{}
-
-	// fill the VTable with noops, except for OnDefaultDeviceChanged. that one's gold
-	sf.mmNotificationClient.VTable.QueryInterface = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.AddRef = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.Release = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.OnDeviceStateChanged = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.OnDeviceAdded = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.OnDeviceRemoved = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.OnPropertyValueChanged = syscall.NewCallback(sf.noopCallback)
-
-	sf.mmNotificationClient.VTable.OnDefaultDeviceChanged = syscall.NewCallback(sf.defaultDeviceChangedCallback)
+	notificationClient := NewNotificationClient(sf)
+	sf.mmNotificationClient = (*wca.IMMNotificationClient)(unsafe.Pointer(notificationClient))
 
 	if err := sf.mmDeviceEnumerator.RegisterEndpointNotificationCallback(sf.mmNotificationClient); err != nil {
 		sf.logger.Warnw("Failed to call RegisterEndpointNotificationCallback", "error", err)
@@ -240,135 +346,77 @@ func (sf *wcaSessionFinder) getMasterSession(mmDevice *wca.IMMDevice, key string
 	return master, nil
 }
 
+func (sf *wcaSessionFinder) processDevice(deviceIdx uint32, deviceCollection *wca.IMMDeviceCollection, sessions *[]Session) error {
+	if deviceCollection == nil || sessions == nil {
+		return fmt.Errorf("nil device collection or sessions slice")
+	}
+
+	var endpoint *wca.IMMDevice
+	if err := deviceCollection.Item(deviceIdx, &endpoint); err != nil {
+		return fmt.Errorf("get device %d from collection: %w", deviceIdx, err)
+	}
+	if endpoint == nil {
+		return fmt.Errorf("got nil endpoint for device %d", deviceIdx)
+	}
+	defer endpoint.Release()
+
+	deviceInfo, err := sf.getDeviceInfo(deviceIdx, endpoint)
+	if err != nil {
+		sf.logger.Warnw("Failed to get device info", "deviceIdx", deviceIdx, "error", err)
+		return fmt.Errorf("get device %d info: %w", deviceIdx, err)
+	}
+
+	return sf.handleDevice(deviceIdx, deviceInfo, sessions)
+}
+
+func (sf *wcaSessionFinder) handleDevice(deviceIdx uint32, deviceInfo *audioDevice, sessions *[]Session) error {
+	sf.logger.Debugw("Enumerated device info",
+		"deviceIdx", deviceIdx,
+		"deviceDescription", deviceInfo.description,
+		"deviceFriendlyName", deviceInfo.friendlyName,
+		"dataFlow", deviceInfo.dataFlow)
+
+	if deviceInfo.dataFlow == wca.ERender {
+		if err := sf.enumerateAndAddProcessSessions(deviceInfo.endpoint, deviceInfo.friendlyName, sessions); err != nil {
+			sf.logger.Warnw("Failed to enumerate and add process sessions for device", "deviceIdx", deviceIdx, "error", err)
+			return fmt.Errorf("enumerate and add device %d process sessions: %w", deviceIdx, err)
+		}
+	}
+
+	newSession, err := sf.getMasterSession(deviceInfo.endpoint,
+		deviceInfo.friendlyName,
+		fmt.Sprintf(deviceSessionFormat, deviceInfo.description))
+	if err != nil {
+		sf.logger.Warnw("Failed to get master session for device", "deviceIdx", deviceIdx, "error", err)
+		return fmt.Errorf("get device %d master session: %w", deviceIdx, err)
+	}
+
+	*sessions = append(*sessions, newSession)
+	return nil
+}
+
 func (sf *wcaSessionFinder) enumerateAndAddSessions(sessions *[]Session) error {
-
-	// get list of devices
-	var deviceCollection *wca.IMMDeviceCollection
-
-	if err := sf.mmDeviceEnumerator.EnumAudioEndpoints(wca.EAll, wca.DEVICE_STATE_ACTIVE, &deviceCollection); err != nil {
-		sf.logger.Warnw("Failed to enumerate active audio endpoints", "error", err)
-		return fmt.Errorf("enumerate active audio endpoints: %w", err)
-	}
-
-	// check how many devices there are
-	var deviceCount uint32
-
-	if err := deviceCollection.GetCount(&deviceCount); err != nil {
-		sf.logger.Warnw("Failed to get device count from device collection", "error", err)
-		return fmt.Errorf("get device count from device collection: %w", err)
-	}
-
-	// for each device:
-	for deviceIdx := uint32(0); deviceIdx < deviceCount; deviceIdx++ {
-
-		// get its IMMDevice instance
-		var endpoint *wca.IMMDevice
-
-		if err := deviceCollection.Item(deviceIdx, &endpoint); err != nil {
-			sf.logger.Warnw("Failed to get device from device collection",
-				"deviceIdx", deviceIdx,
-				"error", err)
-
-			return fmt.Errorf("get device %d from device collection: %w", deviceIdx, err)
+	return withRetry(func() error {
+		var deviceCollection *wca.IMMDeviceCollection
+		if err := sf.mmDeviceEnumerator.EnumAudioEndpoints(wca.EAll, wca.DEVICE_STATE_ACTIVE, &deviceCollection); err != nil {
+			return fmt.Errorf("enumerate active audio endpoints: %w", err)
 		}
-		defer endpoint.Release()
+		defer deviceCollection.Release()
 
-		// get its IMMEndpoint instance to figure out if it's an output device (and we need to enumerate its process sessions later)
-		dispatch, err := endpoint.QueryInterface(wca.IID_IMMEndpoint)
-		if err != nil {
-			sf.logger.Warnw("Failed to query IMMEndpoint for device",
-				"deviceIdx", deviceIdx,
-				"error", err)
-
-			return fmt.Errorf("query device %d IMMEndpoint: %w", deviceIdx, err)
+		var deviceCount uint32
+		if err := deviceCollection.GetCount(&deviceCount); err != nil {
+			sf.logger.Warnw("Failed to get device count from device collection", "error", err)
+			return fmt.Errorf("get device count from device collection: %w", err)
 		}
 
-		// get the device's property store
-		var propertyStore *wca.IPropertyStore
-
-		if err := endpoint.OpenPropertyStore(wca.STGM_READ, &propertyStore); err != nil {
-			sf.logger.Warnw("Failed to open property store for endpoint",
-				"deviceIdx", deviceIdx,
-				"error", err)
-
-			return fmt.Errorf("open endpoint %d property store: %w", deviceIdx, err)
-		}
-		defer propertyStore.Release()
-
-		// query the property store for the device's description and friendly name
-		value := &wca.PROPVARIANT{}
-
-		if err := propertyStore.GetValue(&wca.PKEY_Device_DeviceDesc, value); err != nil {
-			sf.logger.Warnw("Failed to get description for device",
-				"deviceIdx", deviceIdx,
-				"error", err)
-
-			return fmt.Errorf("get device %d description: %w", deviceIdx, err)
-		}
-
-		// device description i.e. "Headphones"
-		endpointDescription := strings.ToLower(value.String())
-
-		if err := propertyStore.GetValue(&wca.PKEY_Device_FriendlyName, value); err != nil {
-			sf.logger.Warnw("Failed to get friendly name for device",
-				"deviceIdx", deviceIdx,
-				"error", err)
-
-			return fmt.Errorf("get device %d friendly name: %w", deviceIdx, err)
-		}
-
-		// device friendly name i.e. "Headphones (Realtek Audio)"
-		endpointFriendlyName := value.String()
-
-		// receive a useful object instead of our dispatch
-		endpointType := (*wca.IMMEndpoint)(unsafe.Pointer(dispatch))
-		defer endpointType.Release()
-
-		var dataFlow uint32
-		if err := endpointType.GetDataFlow(&dataFlow); err != nil {
-			sf.logger.Warnw("Failed to get data flow for endpoint",
-				"deviceIdx", deviceIdx,
-				"error", err)
-
-			return fmt.Errorf("get device %d data flow: %w", deviceIdx, err)
-		}
-
-		sf.logger.Debugw("Enumerated device info",
-			"deviceIdx", deviceIdx,
-			"deviceDescription", endpointDescription,
-			"deviceFriendlyName", endpointFriendlyName,
-			"dataFlow", dataFlow)
-
-		// if the device is an output device, enumerate and add its per-process audio sessions
-		if dataFlow == wca.ERender {
-			if err := sf.enumerateAndAddProcessSessions(endpoint, endpointFriendlyName, sessions); err != nil {
-				sf.logger.Warnw("Failed to enumerate and add process sessions for device",
-					"deviceIdx", deviceIdx,
-					"error", err)
-
-				return fmt.Errorf("enumerate and add device %d process sessions: %w", deviceIdx, err)
+		for deviceIdx := uint32(0); deviceIdx < deviceCount; deviceIdx++ {
+			if err := sf.processDevice(deviceIdx, deviceCollection, sessions); err != nil {
+				return err
 			}
 		}
 
-		// for all devices (both input and output), add a named "master" session that can be addressed
-		// by using the device's friendly name (as appears when the user left-clicks the speaker icon in the tray)
-		newSession, err := sf.getMasterSession(endpoint,
-			endpointFriendlyName,
-			fmt.Sprintf(deviceSessionFormat, endpointDescription))
-
-		if err != nil {
-			sf.logger.Warnw("Failed to get master session for device",
-				"deviceIdx", deviceIdx,
-				"error", err)
-
-			return fmt.Errorf("get device %d master session: %w", deviceIdx, err)
-		}
-
-		// add it to our slice
-		*sessions = append(*sessions, newSession)
-	}
-
-	return nil
+		return nil
+	})
 }
 
 func (sf *wcaSessionFinder) enumerateAndAddProcessSessions(
@@ -376,36 +424,41 @@ func (sf *wcaSessionFinder) enumerateAndAddProcessSessions(
 	endpointFriendlyName string,
 	sessions *[]Session,
 ) error {
-
 	sf.logger.Debugw("Enumerating and adding process sessions for audio output device",
 		"deviceFriendlyName", endpointFriendlyName)
 
-	// query the given IMMDevice's IAudioSessionManager2 interface
-	var audioSessionManager2 *wca.IAudioSessionManager2
+	sessionEnumerator, err := sf.getSessionEnumerator(endpoint)
+	if err != nil {
+		return err
+	}
+	defer sessionEnumerator.Release()
 
+	return sf.processAudioSessions(sessionEnumerator, sessions)
+}
+
+func (sf *wcaSessionFinder) getSessionEnumerator(endpoint *wca.IMMDevice) (*wca.IAudioSessionEnumerator, error) {
+	var audioSessionManager2 *wca.IAudioSessionManager2
 	if err := endpoint.Activate(
 		wca.IID_IAudioSessionManager2,
 		wca.CLSCTX_ALL,
 		nil,
 		&audioSessionManager2,
 	); err != nil {
-
 		sf.logger.Warnw("Failed to activate endpoint as IAudioSessionManager2", "error", err)
-		return fmt.Errorf("activate endpoint: %w", err)
+		return nil, fmt.Errorf("activate endpoint: %w", err)
 	}
 	defer audioSessionManager2.Release()
 
-	// get its IAudioSessionEnumerator
 	var sessionEnumerator *wca.IAudioSessionEnumerator
-
 	if err := audioSessionManager2.GetSessionEnumerator(&sessionEnumerator); err != nil {
-		return err
+		return nil, err
 	}
-	defer sessionEnumerator.Release()
 
-	// check how many audio sessions there are
+	return sessionEnumerator, nil
+}
+
+func (sf *wcaSessionFinder) processAudioSessions(sessionEnumerator *wca.IAudioSessionEnumerator, sessions *[]Session) error {
 	var sessionCount int
-
 	if err := sessionEnumerator.GetCount(&sessionCount); err != nil {
 		sf.logger.Warnw("Failed to get session count from session enumerator", "error", err)
 		return fmt.Errorf("get session count: %w", err)
@@ -413,101 +466,99 @@ func (sf *wcaSessionFinder) enumerateAndAddProcessSessions(
 
 	sf.logger.Debugw("Got session count from session enumerator", "count", sessionCount)
 
-	// for each session:
-	for sessionIdx := 0; sessionIdx < sessionCount; sessionIdx++ {
-
-		// get the IAudioSessionControl
-		var audioSessionControl *wca.IAudioSessionControl
-		if err := sessionEnumerator.GetSession(sessionIdx, &audioSessionControl); err != nil {
-			sf.logger.Warnw("Failed to get session from session enumerator",
-				"error", err,
-				"sessionIdx", sessionIdx)
-
-			return fmt.Errorf("get session %d from enumerator: %w", sessionIdx, err)
+	for sessionIdx := range sessionCount {
+		if err := sf.processSession(sessionIdx, sessionEnumerator, sessions); err != nil {
+			return err
 		}
-
-		// query its IAudioSessionControl2
-		dispatch, err := audioSessionControl.QueryInterface(wca.IID_IAudioSessionControl2)
-		if err != nil {
-			sf.logger.Warnw("Failed to query session's IAudioSessionControl2",
-				"error", err,
-				"sessionIdx", sessionIdx)
-
-			return fmt.Errorf("query session %d IAudioSessionControl2: %w", sessionIdx, err)
-		}
-
-		// we no longer need the IAudioSessionControl, release it
-		audioSessionControl.Release()
-
-		// receive a useful object instead of our dispatch
-		audioSessionControl2 := (*wca.IAudioSessionControl2)(unsafe.Pointer(dispatch))
-
-		var pid uint32
-
-		// get the session's PID
-		if err := audioSessionControl2.GetProcessId(&pid); err != nil {
-
-			// if this is the system sounds session, GetProcessId will error with an undocumented
-			// AUDCLNT_S_NO_CURRENT_PROCESS (0x889000D) - this is fine, we actually want to treat it a bit differently
-			// The first part of this condition will be true if the call to IsSystemSoundsSession fails
-			// The second part will be true if the original error mesage from GetProcessId doesn't contain this magical
-			// error code (in decimal format).
-			isSystemSoundsErr := audioSessionControl2.IsSystemSoundsSession()
-			if isSystemSoundsErr != nil && !strings.Contains(err.Error(), "143196173") {
-
-				// of course, if it's not the system sounds session, we got a problem
-				sf.logger.Warnw("Failed to query session's pid",
-					"error", err,
-					"isSystemSoundsError", isSystemSoundsErr,
-					"sessionIdx", sessionIdx)
-
-				return fmt.Errorf("query session %d pid: %w", sessionIdx, err)
-			}
-
-			// update 2020/08/31: this is also the exact case for UWP applications, so we should no longer override the PID.
-			// it will successfully update whenever we call GetProcessId for e.g. Video.UI.exe, despite the error being non-nil.
-		}
-
-		// get its ISimpleAudioVolume
-		dispatch, err = audioSessionControl2.QueryInterface(wca.IID_ISimpleAudioVolume)
-		if err != nil {
-			sf.logger.Warnw("Failed to query session's ISimpleAudioVolume",
-				"error", err,
-				"sessionIdx", sessionIdx)
-
-			return fmt.Errorf("query session %d ISimpleAudioVolume: %w", sessionIdx, err)
-		}
-
-		// make it useful, again
-		simpleAudioVolume := (*wca.ISimpleAudioVolume)(unsafe.Pointer(dispatch))
-
-		// create the deej session object
-		newSession, err := newWCASession(sf.sessionLogger, audioSessionControl2, simpleAudioVolume, pid, sf.eventCtx)
-		if err != nil {
-
-			// this could just mean this process is already closed by now, and the session will be cleaned up later by the OS
-			if !errors.Is(err, errNoSuchProcess) {
-				sf.logger.Warnw("Failed to create new WCA session instance",
-					"error", err,
-					"sessionIdx", sessionIdx)
-
-				return fmt.Errorf("create wca session for session %d: %w", sessionIdx, err)
-			}
-
-			// in this case, log it and release the session's handles, then skip to the next one
-			sf.logger.Debugw("Process already exited, skipping session and releasing handles", "pid", pid)
-
-			audioSessionControl2.Release()
-			simpleAudioVolume.Release()
-
-			continue
-		}
-
-		// add it to our slice
-		*sessions = append(*sessions, newSession)
 	}
 
 	return nil
+}
+
+func (sf *wcaSessionFinder) processSession(sessionIdx int, sessionEnumerator *wca.IAudioSessionEnumerator, sessions *[]Session) error {
+	audioSessionControl2, err := sf.getAudioSessionControl2(sessionIdx, sessionEnumerator)
+	if err != nil {
+		return err
+	}
+
+	simpleAudioVolume, err := sf.getSimpleAudioVolume(sessionIdx, audioSessionControl2)
+	if err != nil {
+		audioSessionControl2.Release()
+		return err
+	}
+
+	pid, err := sf.getProcessId(sessionIdx, audioSessionControl2)
+	if err != nil {
+		audioSessionControl2.Release()
+		simpleAudioVolume.Release()
+		return err
+	}
+
+	newSession, err := newWCASession(sf.sessionLogger, audioSessionControl2, simpleAudioVolume, pid, sf.eventCtx)
+	if err != nil {
+		if !errors.Is(err, errNoSuchProcess) {
+			sf.logger.Warnw("Failed to create new WCA session instance",
+				"error", err,
+				"sessionIdx", sessionIdx)
+			return fmt.Errorf("create wca session for session %d: %w", sessionIdx, err)
+		}
+
+		sf.logger.Debugw("Process already exited, skipping session and releasing handles", "pid", pid)
+		audioSessionControl2.Release()
+		simpleAudioVolume.Release()
+		return nil
+	}
+
+	*sessions = append(*sessions, newSession)
+	return nil
+}
+
+func (sf *wcaSessionFinder) getAudioSessionControl2(sessionIdx int, sessionEnumerator *wca.IAudioSessionEnumerator) (*wca.IAudioSessionControl2, error) {
+	var audioSessionControl *wca.IAudioSessionControl
+	if err := sessionEnumerator.GetSession(sessionIdx, &audioSessionControl); err != nil {
+		sf.logger.Warnw("Failed to get session from session enumerator",
+			"error", err,
+			"sessionIdx", sessionIdx)
+		return nil, fmt.Errorf("get session %d from enumerator: %w", sessionIdx, err)
+	}
+	defer audioSessionControl.Release()
+
+	dispatch, err := audioSessionControl.QueryInterface(wca.IID_IAudioSessionControl2)
+	if err != nil {
+		sf.logger.Warnw("Failed to query session's IAudioSessionControl2",
+			"error", err,
+			"sessionIdx", sessionIdx)
+		return nil, fmt.Errorf("query session %d IAudioSessionControl2: %w", sessionIdx, err)
+	}
+
+	return (*wca.IAudioSessionControl2)(unsafe.Pointer(dispatch)), nil
+}
+
+func (sf *wcaSessionFinder) getSimpleAudioVolume(sessionIdx int, audioSessionControl2 *wca.IAudioSessionControl2) (*wca.ISimpleAudioVolume, error) {
+	dispatch, err := audioSessionControl2.QueryInterface(wca.IID_ISimpleAudioVolume)
+	if err != nil {
+		sf.logger.Warnw("Failed to query session's ISimpleAudioVolume",
+			"error", err,
+			"sessionIdx", sessionIdx)
+		return nil, fmt.Errorf("query session %d ISimpleAudioVolume: %w", sessionIdx, err)
+	}
+
+	return (*wca.ISimpleAudioVolume)(unsafe.Pointer(dispatch)), nil
+}
+
+func (sf *wcaSessionFinder) getProcessId(sessionIdx int, audioSessionControl2 *wca.IAudioSessionControl2) (uint32, error) {
+	var pid uint32
+	if err := audioSessionControl2.GetProcessId(&pid); err != nil {
+		isSystemSoundsErr := audioSessionControl2.IsSystemSoundsSession()
+		if isSystemSoundsErr != nil && !strings.Contains(err.Error(), fmt.Sprintf("%d", systemSoundsErrorCode)) {
+			sf.logger.Warnw("Failed to query session's pid",
+				"error", err,
+				"isSystemSoundsError", isSystemSoundsErr,
+				"sessionIdx", sessionIdx)
+			return 0, fmt.Errorf("query session %d pid: %w", sessionIdx, err)
+		}
+	}
+	return pid, nil
 }
 
 func (sf *wcaSessionFinder) defaultDeviceChangedCallback(
@@ -516,7 +567,6 @@ func (sf *wcaSessionFinder) defaultDeviceChangedCallback(
 	lpcwstr uintptr,
 ) (hResult uintptr) {
 
-	// filter out calls that happen in rapid succession
 	now := time.Now()
 
 	if sf.lastDefaultDeviceChange.Add(minDefaultDeviceChangeThreshold).After(now) {
@@ -538,4 +588,67 @@ func (sf *wcaSessionFinder) defaultDeviceChangedCallback(
 }
 func (sf *wcaSessionFinder) noopCallback() (hResult uintptr) {
 	return
+}
+
+func (sf *wcaSessionFinder) isConnected() bool {
+	return sf.mmDeviceEnumerator != nil && sf.mmNotificationClient != nil
+}
+
+func (sf *wcaSessionFinder) getDeviceInfo(_ uint32, endpoint *wca.IMMDevice) (*audioDevice, error) {
+	var propertyStore *wca.IPropertyStore
+	if err := endpoint.OpenPropertyStore(wca.STGM_READ, &propertyStore); err != nil {
+		return nil, fmt.Errorf("open endpoint property store: %w", err)
+	}
+	defer propertyStore.Release()
+
+	value := &wca.PROPVARIANT{}
+	if err := propertyStore.GetValue(&wca.PKEY_Device_DeviceDesc, value); err != nil {
+		return nil, fmt.Errorf("get device description: %w", err)
+	}
+	description := strings.ToLower(value.String())
+
+	if err := propertyStore.GetValue(&wca.PKEY_Device_FriendlyName, value); err != nil {
+		return nil, fmt.Errorf("get device friendly name: %w", err)
+	}
+	friendlyName := value.String()
+
+	dispatch, err := endpoint.QueryInterface(wca.IID_IMMEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("query IMMEndpoint: %w", err)
+	}
+
+	endpointType := (*wca.IMMEndpoint)(unsafe.Pointer(dispatch))
+	defer endpointType.Release()
+
+	var dataFlow uint32
+	if err := endpointType.GetDataFlow(&dataFlow); err != nil {
+		return nil, fmt.Errorf("get data flow: %w", err)
+	}
+
+	return &audioDevice{
+		endpoint:     endpoint,
+		description:  description,
+		friendlyName: friendlyName,
+		dataFlow:     dataFlow,
+	}, nil
+}
+
+func (sf *wcaSessionFinder) monitorConnection() {
+	ticker := time.NewTicker(5 * time.Second)
+	go func() {
+		for {
+			select {
+			case <-sf.ctx.Done():
+				ticker.Stop()
+				return
+			case <-ticker.C:
+				if !sf.isConnected() {
+					sf.logger.Warn("Connection lost, attempting to reconnect...")
+					if _, err := sf.getAllSessionsInternal(); err != nil {
+						sf.logger.Errorw("Failed to reconnect", "error", err)
+					}
+				}
+			}
+		}
+	}()
 }
