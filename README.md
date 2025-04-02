@@ -1,4 +1,4 @@
-# deej
+# deej - updated 2025
 
 deej is an **open-source hardware volume mixer** for Windows and Linux PCs. It lets you use real-life sliders (like a DJ!) to **seamlessly control the volumes of different apps** (such as your music player, the game you're playing and your voice chat session) without having to stop what you're doing.
 
@@ -12,9 +12,11 @@ deej consists of a [lightweight desktop client](#features) written in Go, and an
 
 **[Download the latest release](https://github.com/omriharel/deej/releases/latest) | [Video demonstration](https://youtu.be/VoByJ4USMr8) | [Build video by Tech Always](https://youtu.be/x2yXbFiiAeI)**
 
-![deej](assets/build-3d-annotated.png)
+[![deej](https://i.etsystatic.com/8250223/r/il/c59f1e/3799724763/il_1588xN.3799724763_tufo.jpg)](https://www.etsy.com/listing/1535728221/deej-audio-mixer-games-volume-chat-and)
+> 🛍️ No time? Buy one on Etsy. [This one comes highly recommended](https://www.etsy.com/listing/1535728221/deej-audio-mixer-games-volume-chat-and)!
 
-> _**Psst!** [No 3D printer? No problem!](./assets/build-shoebox.jpg)_ You can build deej on some cardboard, a shoebox or even a breadboard :)
+> ☝️ [No 3D printer? No problem!](./assets/build-shoebox.jpg)_ You can build deej on some cardboard, a shoebox or even a breadboard :)
+
 
 ## Table of contents
 
@@ -39,7 +41,7 @@ deej consists of a [lightweight desktop client](#features) written in Go, and an
 
 ## Features
 
-deej is written in Go and [distributed](https://github.com/omriharel/deej/releases/latest) as a portable (no installer needed) executable.
+deej is written in Go and [distributed](https://github.com/michaelwschultz/deej/releases/latest) as a portable (no installer needed) executable.
 
 - Bind apps to different sliders
   - Bind multiple apps per slider (i.e. one slider for all your games)
@@ -52,8 +54,6 @@ deej is written in Go and [distributed](https://github.com/omriharel/deej/releas
 - Lightweight desktop client, consuming around 10MB of memory
 - Runs from your system tray
 - Helpful notifications to let you know if something isn't working
-
-> **Looking for the older Python version?** It's no longer maintained, but you can always find it in the [`legacy-python` branch](https://github.com/omriharel/deej/tree/legacy-python).
 
 ## How it works
 
@@ -177,7 +177,7 @@ With many different 3D-printed designs being added to our [community showcase](.
 
 ### Download and installation
 
-- Head over to the [releases page](https://github.com/omriharel/deej/releases) and download the [latest version](https://github.com/omriharel/deej/releases/latest)'s executable and configuration file (`deej.exe` and `config.yaml`)
+- Head over to the [releases page](https://github.com/michaelwschultz/deej/releases) and download the [latest version](https://github.com/michaelwschultz/deej/releases/latest)'s executable and configuration file (`deej.exe` and `config.yaml`)
 - Place them in the same directory anywhere on your machine
 - (Optional, on Windows) Create a shortcut to `deej.exe` and copy it to `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup` to have deej run on boot
 
@@ -199,7 +199,7 @@ The server is also a great place to ask questions, suggest features or report bu
 
 ### Donations
 
-If you love deej and want to show your support for this project, you can do so using the link below. Please don't feel obligated to donate - building the project and telling your friends about it goes a very long way! Thank you very much.
+If you love deej and want to show your support for the original project, you can do so using the link below. Please don't feel obligated to donate - building the project and telling your friends about it goes a very long way! Thank you very much.
 
 [![ko-fi](https://www.ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/omriharel)
 
