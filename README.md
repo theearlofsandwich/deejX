@@ -8,7 +8,7 @@ deej is an **open-source hardware volume mixer** for Windows and Linux PCs. It l
 
 deej consists of a [lightweight desktop client](#features) written in Go, and an Arduino-based hardware setup that's simple and cheap to build. [**Check out some versions built by members of our community!**](./community.md)
 
-**[Download the latest release](https://github.com/omriharel/deej/releases/latest) | [Video demonstration](https://youtu.be/VoByJ4USMr8) | [Build video by Tech Always](https://youtu.be/x2yXbFiiAeI)**
+**[Download the latest release](https://github.com/michaelwschultz/deej/releases/latest) | [Featured on Linus Tech Tips]([https://youtu.be/VoByJ4USMr8](https://www.youtube.com/watch?v=8BxVi6YiicQ&t=168s)) | [Build video by Tech Always](https://youtu.be/x2yXbFiiAeI)**
 
 [![deej](https://i.etsystatic.com/8250223/r/il/c59f1e/3799724763/il_1588xN.3799724763_tufo.jpg)](https://www.etsy.com/listing/1535728221/deej-audio-mixer-games-volume-chat-and)
 > 🛍️ No time? Buy one on Etsy. [This one comes highly recommended](https://www.etsy.com/listing/1535728221/deej-audio-mixer-games-volume-chat-and)!
