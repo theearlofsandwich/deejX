@@ -1,244 +1,282 @@
-#include <Arduino.h>
+#include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Wire.h>
 #include <ResponsiveAnalogRead.h>
+#include <avr/wdt.h>
 
-#define SLIDER1 "Master"
-#define SLIDER2 "Unbound"
-#define SLIDER3 "Discord"
+// Configuration constants
+#define CONFIG_NUM_SLIDERS 2
+#define CONFIG_BAUD_RATE 9600
+#define CONFIG_ANALOG_THRESHOLD 15
+#define CONFIG_KEEPALIVE_TIMEOUT 10000
 
-const int NUM_SLIDERS = 2;
+// Pin definitions
+#define PIN_ENCODER_CLK 2
+#define PIN_ENCODER_DT 3
+#define PIN_ENCODER_SW 4
 
-#define ENCODER_CLK 2
-#define ENCODER_DT 3
-#define ENCODER_SW 4
-
-#define SHOWSCREENS true
-
+// Display configuration
+#define DISPLAY_WIDTH 128
+#define DISPLAY_HEIGHT 32
+#define DISPLAY_RESET_PIN -1
+#define SCREEN_ADDRESS 0x3C
 #define TCAADDR 0x70
 
-#define SCREEN_ADDRESS 0x3C
-
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-//#define SCREEN_HEIGHT 64 // OLED display height, in pixels
-#define SCREEN_HEIGHT 32 // OLED display height, in pixels
-#define OLED_RESET     -1
-
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-
-const byte numChars = 100;
-char receivedChars[numChars];
-char tempChars[numChars];
-boolean newData = false;
-
-int mute = 0;
-int masterVolume = 0;
-
-int currentStateCLK;
-int lastClk = HIGH;
-int lastButtonState = 0;
-
-int analogSliderValues[NUM_SLIDERS];
-const int analogInputs[NUM_SLIDERS] = {A0, A1};
-char outputBuffer[20];
-
+// Buffer sizes
+#define SERIAL_BUFFER_SIZE 100
 #define SLIDER_NAME_LENGTH 20
-char sliderNames[4][SLIDER_NAME_LENGTH];
+#define MAX_SLIDERS 4
 
-int screenSliderValues[NUM_SLIDERS];
-boolean dataChanged = true;
+// Command characters
+#define CMD_EQUAL '='
+#define CMD_PLUS '+'
+#define CMD_MINUS '-'
+#define CMD_CARET '^'
 
+// Global variables
+Adafruit_SSD1306 display(DISPLAY_WIDTH, DISPLAY_HEIGHT, &Wire, DISPLAY_RESET_PIN);
+char outputBuffer[20];
+char receivedChars[SERIAL_BUFFER_SIZE];
+char tempChars[SERIAL_BUFFER_SIZE];
+boolean newData = false;
+unsigned long keepAlive = 0;
 
-#define KEEPALIVE_TIMEOUT 10000
-int keepAlive = 0;
-boolean screensActive = false;
+struct DeejState {
+    // Encoder state
+    int currentStateCLK;
+    int lastClk;
+    int lastButtonState;
+    unsigned long lastButtonPress;
+    
+    // Slider state
+    int analogSliderValues[CONFIG_NUM_SLIDERS];
+    int screenSliderValues[CONFIG_NUM_SLIDERS];
+    
+    // Display state
+    bool screensActive;
+    bool dataChanged;
+    
+    // System state
+    int mute;
+    int masterVolume;
+    unsigned long lastKeepAlive;
+    
+    // Slider names
+    char sliderNames[MAX_SLIDERS][SLIDER_NAME_LENGTH];
+    
+    // Debounce configuration
+    static const unsigned long DEBOUNCE_DELAY = 50;
+    
+    void init() {
+        currentStateCLK = HIGH;
+        lastClk = HIGH;
+        lastButtonState = 0;
+        lastButtonPress = 0;
+        screensActive = true;
+        dataChanged = true;
+        mute = 0;
+        masterVolume = 0;
+        lastKeepAlive = 0;
+        
+        memset(analogSliderValues, 0, sizeof(analogSliderValues));
+        memset(screenSliderValues, 0, sizeof(screenSliderValues));
+        
+        for (int i = 0; i < MAX_SLIDERS; i++) {
+            memset(sliderNames[i], 0, SLIDER_NAME_LENGTH);
+        }
+    }
+};
 
+DeejState state;
 
-ResponsiveAnalogRead analogOne(A0, true);
-ResponsiveAnalogRead analogTwo(A1, true);
+// Responsible analog readers
+ResponsiveAnalogRead analogReaders[CONFIG_NUM_SLIDERS] = {
+    ResponsiveAnalogRead(A0, true),
+    ResponsiveAnalogRead(A1, true)
+};
 
 void setup() {
-  // put your setup code here, to run once:
-  Serial.begin(9600);
-
-  analogOne.setActivityThreshold(15);
-  analogTwo.setActivityThreshold(15);
-  // analogOne.enableEdgeSnap();
-  // analogTwo.enableEdgeSnap();
-  
-  // if(SHOWSCREENS && !display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-  //   Serial.println(F("SSD1306 allocation failed"));
-  //   for(;;); // Don't proceed, loop forever
-  // }
-  if(SHOWSCREENS) {
-    initDisplay(0);
-    initDisplay(1);
-    initDisplay(2);
-  }
-
-  // Set encoder pins as inputs
-  pinMode(ENCODER_CLK ,INPUT);
-  pinMode(ENCODER_DT,INPUT);
-  pinMode(ENCODER_SW, INPUT_PULLUP);
-
-
-  // Read the initial state of CLK
-  attachInterrupt(digitalPinToInterrupt(ENCODER_CLK), readEncoderTurn, FALLING);
-
-  for (int i = 0; i < NUM_SLIDERS; i++) {
-    pinMode(analogInputs[i], INPUT);
-  }
+    // Initialize watchdog timer
+    wdt_disable();
+    wdt_enable(WDTO_1S);
+    
+    Serial.begin(CONFIG_BAUD_RATE);
+    state.init();
+    
+    // Initialize analog readers
+    for (int i = 0; i < CONFIG_NUM_SLIDERS; i++) {
+        analogReaders[i].setActivityThreshold(CONFIG_ANALOG_THRESHOLD);
+    }
+    
+    // Initialize encoder pins
+    pinMode(PIN_ENCODER_CLK, INPUT);
+    pinMode(PIN_ENCODER_DT, INPUT);
+    pinMode(PIN_ENCODER_SW, INPUT_PULLUP);
+    
+    attachInterrupt(digitalPinToInterrupt(PIN_ENCODER_CLK), readEncoderTurn, FALLING);
+    
+    // Initialize displays
+    for (int i = 0; i < 3; i++) {
+        if (!initDisplay(i)) {
+            Serial.print(F("Display "));
+            Serial.print(i);
+            Serial.println(F(" initialization failed"));
+        }
+    }
 }
-
 
 void loop() {
-  // put your main code here, to run repeatedly:
-
-  // Let's read the current system volume
-  receiveWithStartEndMarkers();
-  if (newData == true) {
-    strcpy(tempChars, receivedChars);
-        // this temporary copy is necessary to protect the original data
-        //   because strtok() used in parseData() replaces the commas with \0
-    parseReceivedData();
-    newData = false;
-
-tcaselect(0);
-  display.clearDisplay();
-  
-//   display.setTextSize(1);
-//   display.setTextColor(SSD1306_WHITE);
-//   display.setCursor(5, 0);
-// display.println("updated");
-// display.display();
-  }
-
-  // Read the button state
-  int btnState = digitalRead(ENCODER_SW);
-  //If we detect LOW signal, button is pressed
-  if (btnState == LOW) {
-    lastButtonState = 1;
-  } else {
-    if(lastButtonState == 1) {
-      // Button released
-      sprintf(outputBuffer, "^|%d|%d", analogSliderValues[0], analogSliderValues[1]);
-      Serial.println(outputBuffer);
-      lastButtonState = 0;
-      dataChanged = true;      
+    wdt_reset(); // Reset watchdog timer
+    
+    receiveWithStartEndMarkers();
+    if (newData) {
+        strcpy(tempChars, receivedChars);
+        parseReceivedData();
+        newData = false;
     }
-  }
-  
-  updateSliderValues();
-  sendSliderValues();
-
+    
+    handleEncoder();
+    updateSliderValues();
+    
     // Check keepalive timeout
-  if (millis() - keepAlive > KEEPALIVE_TIMEOUT) {
-    if (screensActive) {  // Only turn off if currently active
-      screensActive = false;
-      // Turn off all displays
-      for (int i = 0; i < 3; i++) {
-        tcaselect(i);
-        display.clearDisplay();
-        display.display();
-      }
+    if (millis() - keepAlive > CONFIG_KEEPALIVE_TIMEOUT) {
+        if (state.screensActive) {
+            state.screensActive = false;
+            for (int i = 0; i < 3; i++) {
+                tcaselect(i);
+                display.clearDisplay();
+                display.display();
+            }
+        }
     }
-  }
-
-  if(SHOWSCREENS && dataChanged && screensActive) {
-    updateDisplay(0);
-    updateDisplay(1);
-    updateDisplay(2);
-    dataChanged = false;
-  }
-
-  delay(10);
-
+    
+    if (state.screensActive && state.dataChanged) {
+        updateDisplay(0);
+        updateDisplay(1);
+        updateDisplay(2);
+        state.dataChanged = false;
+    }
+    
+    delay(10);
 }
 
-void initDisplay(int displayId) {
-  tcaselect(displayId);
-  display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
-  display.clearDisplay();
-  display.display();
-}
-
-void updateDisplay(int displayId) {
-  tcaselect(displayId);
-
-  display.clearDisplay();
-  
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(5, 0);
-
-  switch (displayId) {
-    case 0:
-      display.println(sliderNames[0]);
-      drawBars(masterVolume, 100);
-      break;
-    case 1:
-      display.println(sliderNames[1]);
-      drawBars(analogSliderValues[0], 100);
-      break;
-    case 2:
-      display.println(sliderNames[2]);
-      drawBars(analogSliderValues[1], 100);
-      break;
-  }
-
-  display.display();
-}
-
-void drawBars(int value, int maxValue) {
-  display.drawRoundRect(0, 12, display.width(), display.height() - 12, 5, SSD1306_WHITE);
-
-  int boxWidth = int(map(value, 0, maxValue, 0, display.width() - 4));
-  if(mute) {
-    display.drawRoundRect(2, 14, boxWidth, display.height() - 16, 5, SSD1306_WHITE);
-  } else {
-    display.fillRoundRect(2, 14, boxWidth, display.height() - 16, 5, SSD1306_WHITE);
-  }
+void handleEncoder() {
+    int btnState = digitalRead(PIN_ENCODER_SW);
+    unsigned long currentTime = millis();
+    
+    if (btnState == LOW && 
+        state.lastButtonState == HIGH && 
+        (currentTime - state.lastButtonPress) > DeejState::DEBOUNCE_DELAY) {
+        
+        sprintf(outputBuffer, "^|%d|%d", 
+            state.analogSliderValues[0], 
+            state.analogSliderValues[1]);
+        Serial.println(outputBuffer);
+        state.dataChanged = true;
+        state.lastButtonPress = currentTime;
+    }
+    state.lastButtonState = btnState;
 }
 
 void readEncoderTurn() {
-
-  int newClk = digitalRead(ENCODER_CLK);
-
-  if (newClk != lastClk) {
-    int dtValue = digitalRead(ENCODER_DT);
-    if (newClk == LOW && dtValue == HIGH) {
-      sprintf(outputBuffer, "+|%d|%d", analogSliderValues[0], analogSliderValues[1]);
-      Serial.println(outputBuffer);
-    }
-    if (newClk == LOW && dtValue == LOW) {
-      sprintf(outputBuffer, "-|%d|%d", analogSliderValues[0], analogSliderValues[1]);
-      Serial.println(outputBuffer);
-    }
-    dataChanged = true;
+  int newClk = digitalRead(PIN_ENCODER_CLK);
+  
+  if (newClk != state.lastClk) {
+      int dtValue = digitalRead(PIN_ENCODER_DT);
+      char command = (newClk == LOW && dtValue == HIGH) ? '+' : '-';
+      
+      if (command == '+' || command == '-') {
+          sprintf(outputBuffer, "%c|%d|%d", 
+              command,
+              state.analogSliderValues[0], 
+              state.analogSliderValues[1]);
+          Serial.println(outputBuffer);
+          state.dataChanged = true;
+      }
   }
+  state.lastClk = newClk;
+}
+
+bool initDisplay(int displayId) {
+    if (displayId >= 3) {
+        Serial.println(F("Error: Invalid display ID"));
+        return false;
+    }
+
+    tcaselect(displayId);
+    
+    if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+        Serial.print(F("Display "));
+        Serial.print(displayId);
+        Serial.println(F(" initialization failed"));
+        return false;
+    }
+    
+    display.clearDisplay();
+    display.display();
+    return true;
+}
+
+void updateDisplay(int displayId) {
+    tcaselect(displayId);
+    display.clearDisplay();
+    
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(5, 0);
+
+    switch (displayId) {
+        case 0:
+            display.println(state.sliderNames[0]);
+            drawBars(state.masterVolume, 100);
+            break;
+        case 1:
+            display.println(state.sliderNames[1]);
+            drawBars(state.analogSliderValues[0], 100);
+            break;
+        case 2:
+            display.println(state.sliderNames[2]);
+            drawBars(state.analogSliderValues[1], 100);
+            break;
+    }
+
+    display.display();
+}
+
+void drawBars(int value, int maxValue) {
+    display.drawRoundRect(0, 12, display.width(), display.height() - 12, 5, SSD1306_WHITE);
+
+    int boxWidth = int(map(value, 0, maxValue, 0, display.width() - 4));
+    if (state.mute) {
+        display.drawRoundRect(2, 14, boxWidth, display.height() - 16, 5, SSD1306_WHITE);
+    } else {
+        display.fillRoundRect(2, 14, boxWidth, display.height() - 16, 5, SSD1306_WHITE);
+    }
 }
 
 void updateSliderValues() {
-  analogOne.update();
-  analogTwo.update();
-
-  analogSliderValues[0] = map(analogOne.getValue(), 0, 1023, 0, 100);
-  analogSliderValues[1] = map(analogTwo.getValue(), 0, 1023, 0, 100);
-
-
-  for (int i = 0; i < NUM_SLIDERS; i++) {
-    if(analogSliderValues[i] != screenSliderValues[i]) {
-      screenSliderValues[i] = analogSliderValues[i];
-      dataChanged = true;
+    for (int i = 0; i < CONFIG_NUM_SLIDERS; i++) {
+        analogReaders[i].update();
+        int newValue = map(analogReaders[i].getValue(), 0, 1023, 0, 100);
+        newValue = constrain(newValue, 0, 100);
+        
+        if (newValue != state.analogSliderValues[i]) {
+            state.analogSliderValues[i] = newValue;
+            state.screenSliderValues[i] = newValue;
+            state.dataChanged = true;
+        }
     }
-  }
+    
+    if (state.dataChanged) {
+        sendSliderValues();
+    }
 }
 
 void sendSliderValues() {
-  sprintf(outputBuffer, "=|%d|%d", analogSliderValues[0], analogSliderValues[1]);
-  Serial.println(outputBuffer);
+    sprintf(outputBuffer, "=|%d|%d", 
+        state.analogSliderValues[0], 
+        state.analogSliderValues[1]);
+    Serial.println(outputBuffer);
 }
 
 void receiveWithStartEndMarkers() {
@@ -255,18 +293,17 @@ void receiveWithStartEndMarkers() {
             if (rc != endMarker) {
                 receivedChars[ndx] = rc;
                 ndx++;
-                if (ndx >= numChars) {
-                    ndx = numChars - 1;
+                if (ndx >= SERIAL_BUFFER_SIZE) {
+                    ndx = SERIAL_BUFFER_SIZE - 1;
                 }
             }
             else {
-                receivedChars[ndx] = '\0'; // terminate the string
+                receivedChars[ndx] = '\0';
                 recvInProgress = false;
                 ndx = 0;
                 newData = true;
             }
         }
-
         else if (rc == startMarker) {
             recvInProgress = true;
         }
@@ -274,65 +311,73 @@ void receiveWithStartEndMarkers() {
 }
 
 void parseReceivedData() {
-    char command = tempChars[0];   // first character is the command
-    char* data = tempChars + 1;    // skip the command character
+    if (strlen(tempChars) < 1) {
+        Serial.println(F("Error: Empty command received"));
+        return;
+    }
+
+    char command = tempChars[0];
+    char* data = tempChars + 1;
 
     switch (command) {
-        case '!': { // e.g., <!0|40>
+        case '!': {
             char *token = strtok(data, "|");
-            if (token != NULL) mute = atoi(token);
-
+            if (token == NULL) {
+                Serial.println(F("Error: Invalid mute command format"));
+                return;
+            }
+            
+            int newMute = constrain(atoi(token), 0, 1);
+            
             token = strtok(NULL, "|");
-            if (token != NULL) masterVolume = atoi(token);
-
-            Serial.println("Parsed mute and volume.");
-            dataChanged = true;
+            if (token == NULL) {
+                Serial.println(F("Error: Invalid volume command format"));
+                return;
+            }
+            
+            int newVolume = constrain(atoi(token), 0, 100);
+            
+            state.mute = newMute;
+            state.masterVolume = newVolume;
+            state.dataChanged = true;
             break;
         }
 
-        case '^': { // e.g., <^master|unbound|hello>
-            const int maxNames = 4; // or whatever limit you want
-            for (int i = 0; i < maxNames; i++) {
-              memset(sliderNames[i], 0, SLIDER_NAME_LENGTH);  // Zero out entire array
-            }
-
+        case '^': {
             int i = 0;
             char *token = strtok(data, "|");
-            while (token != NULL && i < maxNames) {
-              // Safely copy the token
-              size_t tokenLen = strlen(token);
-              size_t copyLen = min(tokenLen, (size_t)SLIDER_NAME_LENGTH - 1);
-              memcpy(sliderNames[i], token, copyLen);
-              sliderNames[i][copyLen] = '\0';  // Ensure null termination
-              i++;
-              token = strtok(NULL, "|");
+            while (token != NULL && i < MAX_SLIDERS) {
+                size_t tokenLen = strlen(token);
+                size_t copyLen = min(tokenLen, (size_t)SLIDER_NAME_LENGTH - 1);
+                memcpy(state.sliderNames[i], token, copyLen);
+                state.sliderNames[i][copyLen] = '\0';
+                i++;
+                token = strtok(NULL, "|");
             }
-            dataChanged = true;
-            Serial.println("Parsed name list.");
+            state.dataChanged = true;
+            Serial.println(F("Parsed name list"));
             break;
         }
 
-        case '#': { // e.g., <#>
-            keepAlive = millis();  // update time
-            if (!screensActive) {  // Only force update if screens were off
-                screensActive = true;
-                dataChanged = true;  // Force screen refresh
+        case '#': {
+            keepAlive = millis();
+            if (!state.screensActive) {
+                state.screensActive = true;
+                state.dataChanged = true;
             }
-            Serial.println("Keep-alive signal received.");
+            Serial.println(F("Keep-alive signal received"));
             break;
         }
 
         default:
-            Serial.println("Unknown command.");
+            Serial.println(F("Unknown command"));
             break;
     }
 }
 
-
 void tcaselect(uint8_t i) {
-  if (i > 7) return;
- 
-  Wire.beginTransmission(TCAADDR);
-  Wire.write(1 << i);
-  Wire.endTransmission();  
+    if (i > 7) return;
+    Wire.beginTransmission(TCAADDR);
+    Wire.write(1 << i);
+    Wire.endTransmission();
 }
