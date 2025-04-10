@@ -5,7 +5,7 @@
 #include <avr/wdt.h>
 
 // Configuration constants
-#define CONFIG_NUM_SLIDERS 2
+#define CONFIG_NUM_SLIDERS 3
 #define CONFIG_BAUD_RATE 9600
 #define CONFIG_ANALOG_THRESHOLD 15
 #define CONFIG_KEEPALIVE_TIMEOUT 10000
@@ -92,7 +92,8 @@ DeejState state;
 // Responsible analog readers
 ResponsiveAnalogRead analogReaders[CONFIG_NUM_SLIDERS] = {
     ResponsiveAnalogRead(A0, true),
-    ResponsiveAnalogRead(A1, true)
+    ResponsiveAnalogRead(A1, true),
+    ResponsiveAnalogRead(A2, true),
 };
 
 void setup() {
@@ -116,7 +117,7 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(PIN_ENCODER_CLK), readEncoderTurn, FALLING);
     
     // Initialize displays
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         if (!initDisplay(i)) {
             Serial.print(F("Display "));
             Serial.print(i);
@@ -142,7 +143,7 @@ void loop() {
     if (millis() - keepAlive > CONFIG_KEEPALIVE_TIMEOUT) {
         if (state.screensActive) {
             state.screensActive = false;
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < 4; i++) {
                 tcaselect(i);
                 display.clearDisplay();
                 display.display();
@@ -154,6 +155,7 @@ void loop() {
         updateDisplay(0);
         updateDisplay(1);
         updateDisplay(2);
+        updateDisplay(3);
         state.dataChanged = false;
     }
     
@@ -198,7 +200,7 @@ void readEncoderTurn() {
 }
 
 bool initDisplay(int displayId) {
-    if (displayId >= 3) {
+    if (displayId >= 4) {
         Serial.println(F("Error: Invalid display ID"));
         return false;
     }
@@ -238,6 +240,10 @@ void updateDisplay(int displayId) {
             display.println(state.sliderNames[2]);
             drawBars(state.analogSliderValues[1], 100);
             break;
+        case 3:
+            display.println(state.sliderNames[3]);
+            drawBars(state.analogSliderValues[2], 100);
+            break;            
     }
 
     display.display();
