@@ -28,7 +28,7 @@ const int NUM_SLIDERS = 2;
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 
-const byte numChars = 10;
+const byte numChars = 100;
 char receivedChars[numChars];
 char tempChars[numChars];
 boolean newData = false;
@@ -44,8 +44,16 @@ int analogSliderValues[NUM_SLIDERS];
 const int analogInputs[NUM_SLIDERS] = {A0, A1};
 char outputBuffer[20];
 
+#define SLIDER_NAME_LENGTH 20
+char sliderNames[4][SLIDER_NAME_LENGTH];
+
 int screenSliderValues[NUM_SLIDERS];
 boolean dataChanged = true;
+
+
+#define KEEPALIVE_TIMEOUT 10000
+int keepAlive = 0;
+boolean screensActive = false;
 
 
 ResponsiveAnalogRead analogOne(A0, true);
@@ -95,8 +103,16 @@ void loop() {
         // this temporary copy is necessary to protect the original data
         //   because strtok() used in parseData() replaces the commas with \0
     parseReceivedData();
-    dataChanged = true;
     newData = false;
+
+tcaselect(0);
+  display.clearDisplay();
+  
+//   display.setTextSize(1);
+//   display.setTextColor(SSD1306_WHITE);
+//   display.setCursor(5, 0);
+// display.println("updated");
+// display.display();
   }
 
   // Read the button state
@@ -117,7 +133,20 @@ void loop() {
   updateSliderValues();
   sendSliderValues();
 
-  if(SHOWSCREENS && dataChanged) {
+    // Check keepalive timeout
+  if (millis() - keepAlive > KEEPALIVE_TIMEOUT) {
+    if (screensActive) {  // Only turn off if currently active
+      screensActive = false;
+      // Turn off all displays
+      for (int i = 0; i < 3; i++) {
+        tcaselect(i);
+        display.clearDisplay();
+        display.display();
+      }
+    }
+  }
+
+  if(SHOWSCREENS && dataChanged && screensActive) {
     updateDisplay(0);
     updateDisplay(1);
     updateDisplay(2);
@@ -131,8 +160,8 @@ void loop() {
 void initDisplay(int displayId) {
   tcaselect(displayId);
   display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
-  display.display();
   display.clearDisplay();
+  display.display();
 }
 
 void updateDisplay(int displayId) {
@@ -146,15 +175,15 @@ void updateDisplay(int displayId) {
 
   switch (displayId) {
     case 0:
-      display.println(F(SLIDER1));
+      display.println(sliderNames[0]);
       drawBars(masterVolume, 100);
       break;
     case 1:
-      display.println(F(SLIDER2));
+      display.println(sliderNames[1]);
       drawBars(analogSliderValues[0], 100);
       break;
     case 2:
-      display.println(F(SLIDER3));
+      display.println(sliderNames[2]);
       drawBars(analogSliderValues[1], 100);
       break;
   }
@@ -244,15 +273,61 @@ void receiveWithStartEndMarkers() {
     }
 }
 
-void parseReceivedData() { // split the data into its parts
-    char * strtokIndx; // this is used by strtok() as an index
+void parseReceivedData() {
+    char command = tempChars[0];   // first character is the command
+    char* data = tempChars + 1;    // skip the command character
 
-    strtokIndx = strtok(tempChars,"|");  // get the first part - the string
-    mute = atoi(strtokIndx);
+    switch (command) {
+        case '!': { // e.g., <!0|40>
+            char *token = strtok(data, "|");
+            if (token != NULL) mute = atoi(token);
 
-    strtokIndx = strtok(NULL, "|"); // this continues where the previous call left off
-    masterVolume = atoi(strtokIndx);     // convert this part to an integer
+            token = strtok(NULL, "|");
+            if (token != NULL) masterVolume = atoi(token);
+
+            Serial.println("Parsed mute and volume.");
+            dataChanged = true;
+            break;
+        }
+
+        case '^': { // e.g., <^master|unbound|hello>
+            const int maxNames = 4; // or whatever limit you want
+            for (int i = 0; i < maxNames; i++) {
+              memset(sliderNames[i], 0, SLIDER_NAME_LENGTH);  // Zero out entire array
+            }
+
+            int i = 0;
+            char *token = strtok(data, "|");
+            while (token != NULL && i < maxNames) {
+              // Safely copy the token
+              size_t tokenLen = strlen(token);
+              size_t copyLen = min(tokenLen, (size_t)SLIDER_NAME_LENGTH - 1);
+              memcpy(sliderNames[i], token, copyLen);
+              sliderNames[i][copyLen] = '\0';  // Ensure null termination
+              i++;
+              token = strtok(NULL, "|");
+            }
+            dataChanged = true;
+            Serial.println("Parsed name list.");
+            break;
+        }
+
+        case '#': { // e.g., <#>
+            keepAlive = millis();  // update time
+            if (!screensActive) {  // Only force update if screens were off
+                screensActive = true;
+                dataChanged = true;  // Force screen refresh
+            }
+            Serial.println("Keep-alive signal received.");
+            break;
+        }
+
+        default:
+            Serial.println("Unknown command.");
+            break;
+    }
 }
+
 
 void tcaselect(uint8_t i) {
   if (i > 7) return;

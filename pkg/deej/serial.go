@@ -188,7 +188,7 @@ func (sio *SerialIO) close(logger *zap.SugaredLogger) {
 
 func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 
-	logger.Infow("Got line", "line", line)
+	//logger.Infow("Got line", "line", line)
 
 	if !expectedLinePattern.MatchString(line) {
 		return

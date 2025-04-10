@@ -15,8 +15,8 @@ slider_mapping:
 ignore_unmapped:
   - rambox.exe
 
-
-slider_names: Master|Chrome
+# Slider name must be separated by | and less than 20 characters each
+slider_names: Master|Chrome|Unbound
 
 # set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
 invert_sliders: false

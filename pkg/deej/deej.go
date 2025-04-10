@@ -101,7 +101,8 @@ func (d *Deej) Initialize() error {
 	}
 
 	d.setupInterruptHandler()
-	d.startMasterVolumeMonitor()
+
+	// d.startMasterVolumeMonitor()
 	// d.sendSliderNamesToArduino()
 
 	// decide whether to run with/without tray
@@ -120,7 +121,8 @@ func (d *Deej) Initialize() error {
 }
 
 func (d *Deej) sendSliderNamesToArduino() {
-	message := fmt.Sprintf("<%s>", d.config.SliderNames)
+	message := fmt.Sprintf("<^%s>", d.config.SliderNames)
+	d.logger.Infow("Sending to serial", "serial", message)
 	d.serial.SendToArduino(message)
 }
 
@@ -156,7 +158,7 @@ func (d *Deej) startMasterVolumeMonitor() {
 				currentVolume := master.GetVolume()
 				currentMute := master.GetMute()
 
-				volumeChanged := util.SignificantlyDifferent(lastVolume, currentVolume, d.config.NoiseReductionLevel)
+				volumeChanged := lastVolume != currentVolume // && util.SignificantlyDifferent(lastVolume, currentVolume, d.config.NoiseReductionLevel)
 				muteChanged := currentMute != lastMute
 
 				if volumeChanged || muteChanged {
@@ -170,7 +172,7 @@ func (d *Deej) startMasterVolumeMonitor() {
 						muteState = 1
 					}
 
-					message := fmt.Sprintf("<%d|%d>", muteState, volumePercent)
+					message := fmt.Sprintf("<!%d|%d>", muteState, volumePercent)
 					d.logger.Infow("Sending to serial", "serial", message)
 					d.serial.SendToArduino(message)
 
@@ -251,6 +253,17 @@ func (d *Deej) run() {
 				d.signalStop()
 			}
 		}
+
+		// Add small delay to ensure serial connection is ready
+		time.Sleep(2000 * time.Millisecond)
+
+		// message := fmt.Sprintf("<%d|%d>", 0, 99)
+		// d.logger.Infow("Sending to serial XXXXXXXXXXXXXXX", "serial", message)
+		// d.serial.SendToArduino(message)
+
+		d.startMasterVolumeMonitor()
+		d.startKeepAliveMessageSender()
+		d.sendSliderNamesToArduino()
 	}()
 
 	// wait until stopped (gracefully)
@@ -289,4 +302,33 @@ func (d *Deej) stop() error {
 	d.logger.Sync()
 
 	return nil
+}
+
+func (d *Deej) startKeepAliveMessageSender() {
+	go func() {
+		const keepAliveMessage = "<#>"
+
+		sendKeepAlive := func() {
+			d.logger.Debugw("Sending keep-alive message", "message", keepAliveMessage)
+			if err := d.serial.SendToArduino(keepAliveMessage); err != nil {
+				d.logger.Warnw("Failed to send keep-alive message", "error", err)
+			}
+		}
+
+		// Send initial keep-alive message immediately
+		sendKeepAlive()
+
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				sendKeepAlive()
+			case <-d.stopChannel:
+				d.logger.Debug("Stopping keep-alive sender")
+				return
+			}
+		}
+	}()
 }
