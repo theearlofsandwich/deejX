@@ -16,12 +16,15 @@ import (
 // CanonicalConfig provides application-wide access to configuration fields,
 // as well as loading/file watching logic for deej's configuration file
 type CanonicalConfig struct {
-	SliderMapping *sliderMap
+	SliderMapping  *sliderMap
+	IgnoreUnmapped []string
 
 	ConnectionInfo struct {
 		COMPort  string
 		BaudRate int
 	}
+
+	SliderNames string
 
 	InvertSliders bool
 
@@ -49,6 +52,8 @@ const (
 	configType = "yaml"
 
 	configKeySliderMapping       = "slider_mapping"
+	configKeyIgnoreUnmapped      = "ignore_unmapped"
+	configKeySliderNames         = "slider_names"
 	configKeyInvertSliders       = "invert_sliders"
 	configKeyCOMPort             = "com_port"
 	configKeyBaudRate            = "baud_rate"
@@ -86,6 +91,7 @@ func NewConfig(logger *zap.SugaredLogger, notifier Notifier) (*CanonicalConfig, 
 	userConfig.AddConfigPath(userConfigPath)
 
 	userConfig.SetDefault(configKeySliderMapping, map[string][]string{})
+	userConfig.SetDefault(configKeySliderNames, "")
 	userConfig.SetDefault(configKeyInvertSliders, false)
 	userConfig.SetDefault(configKeyCOMPort, defaultCOMPort)
 	userConfig.SetDefault(configKeyBaudRate, defaultBaudRate)
@@ -223,6 +229,8 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 		cc.internalConfig.GetStringMapStringSlice(configKeySliderMapping),
 	)
 
+	cc.IgnoreUnmapped = cc.userConfig.GetStringSlice(configKeyIgnoreUnmapped)
+
 	// get the rest of the config fields - viper saves us a lot of effort here
 	cc.ConnectionInfo.COMPort = cc.userConfig.GetString(configKeyCOMPort)
 
@@ -235,6 +243,8 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 
 		cc.ConnectionInfo.BaudRate = defaultBaudRate
 	}
+
+	cc.SliderNames = cc.userConfig.GetString(configKeySliderNames)
 
 	cc.InvertSliders = cc.userConfig.GetBool(configKeyInvertSliders)
 	cc.NoiseReductionLevel = cc.userConfig.GetString(configKeyNoiseReductionLevel)

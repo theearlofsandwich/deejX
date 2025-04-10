@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -26,9 +27,10 @@ type Deej struct {
 	serial   *SerialIO
 	sessions *sessionMap
 
-	stopChannel chan bool
-	version     string
-	verbose     bool
+	stopChannel          chan bool
+	version              string
+	verbose              bool
+	masterVolumeStopChan chan bool
 }
 
 // NewDeej creates a Deej instance
@@ -98,21 +100,103 @@ func (d *Deej) Initialize() error {
 		return fmt.Errorf("init session map: %w", err)
 	}
 
+	d.setupInterruptHandler()
+	d.startMasterVolumeMonitor()
+	// d.sendSliderNamesToArduino()
+
 	// decide whether to run with/without tray
 	if _, noTraySet := os.LookupEnv(envNoTray); noTraySet {
 
 		d.logger.Debugw("Running without tray icon", "reason", "envvar set")
 
 		// run in main thread while waiting on ctrl+C
-		d.setupInterruptHandler()
 		d.run()
 
 	} else {
-		d.setupInterruptHandler()
 		d.initializeTray(d.run)
 	}
 
 	return nil
+}
+
+func (d *Deej) sendSliderNamesToArduino() {
+	message := fmt.Sprintf("<%s>", d.config.SliderNames)
+	d.serial.SendToArduino(message)
+}
+
+func (d *Deej) startMasterVolumeMonitor() {
+	d.masterVolumeStopChan = make(chan bool)
+
+	go func() {
+		const (
+			lowFreqInterval  = 200 * time.Millisecond
+			highFreqInterval = 10 * time.Millisecond
+			stableThreshold  = 100 // how many stable cycles before returning to low freq
+		)
+
+		var (
+			ticker                  = time.NewTicker(lowFreqInterval)
+			currentInterval         = lowFreqInterval
+			lastVolume      float32 = -1
+			lastMute        bool    = false
+			stableCounter   int     = 0
+		)
+
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				sessions, ok := d.sessions.get(masterSessionName)
+				if !ok || len(sessions) == 0 {
+					continue
+				}
+
+				master := sessions[0]
+				currentVolume := master.GetVolume()
+				currentMute := master.GetMute()
+
+				volumeChanged := util.SignificantlyDifferent(lastVolume, currentVolume, d.config.NoiseReductionLevel)
+				muteChanged := currentMute != lastMute
+
+				if volumeChanged || muteChanged {
+					lastVolume = currentVolume
+					lastMute = currentMute
+					stableCounter = 0
+
+					volumePercent := int(currentVolume * 100)
+					muteState := 0
+					if currentMute {
+						muteState = 1
+					}
+
+					message := fmt.Sprintf("<%d|%d>", muteState, volumePercent)
+					d.logger.Infow("Sending to serial", "serial", message)
+					d.serial.SendToArduino(message)
+
+					// Increase polling frequency
+					if currentInterval != highFreqInterval {
+						ticker.Stop()
+						ticker = time.NewTicker(highFreqInterval)
+						currentInterval = highFreqInterval
+						d.logger.Debug("Switching to high-frequency polling")
+					}
+				} else {
+					stableCounter++
+					if stableCounter >= stableThreshold && currentInterval != lowFreqInterval {
+						ticker.Stop()
+						ticker = time.NewTicker(lowFreqInterval)
+						currentInterval = lowFreqInterval
+						d.logger.Debug("Switching to low-frequency polling")
+					}
+				}
+
+			case <-d.masterVolumeStopChan:
+				d.logger.Debug("Stopping master volume monitor")
+				return
+			}
+		}
+	}()
 }
 
 // SetVersion causes deej to add a version string to its tray menu if called before Initialize

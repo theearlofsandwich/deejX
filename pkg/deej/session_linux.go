@@ -222,3 +222,35 @@ func parseChannelVolumes(volumes []uint32) float32 {
 
 	return float32(level) / float32(len(volumes)) / float32(maxVolume)
 }
+
+func (s *masterSession) GetMute() bool {
+	var reply interface{}
+	if s.isOutput {
+		request := proto.GetSinkInfo{SinkIndex: s.streamIndex}
+		res := proto.GetSinkInfoReply{}
+		if err := s.client.Request(&request, &res); err == nil {
+			return res.Mute
+		}
+	} else {
+		request := proto.GetSourceInfo{SourceIndex: s.streamIndex}
+		res := proto.GetSourceInfoReply{}
+		if err := s.client.Request(&request, &res); err == nil {
+			return res.Mute
+		}
+	}
+	return false
+}
+
+func (s *masterSession) SetMute(m bool) error {
+	var request proto.RequestArgs
+	if s.isOutput {
+		request = &proto.SetSinkMute{SinkIndex: s.streamIndex, Mute: m}
+	} else {
+		request = &proto.SetSourceMute{SourceIndex: s.streamIndex, Mute: m}
+	}
+	if err := s.client.Request(request, nil); err != nil {
+		s.logger.Warnw("Failed to set mute", "error", err)
+		return err
+	}
+	return nil
+}

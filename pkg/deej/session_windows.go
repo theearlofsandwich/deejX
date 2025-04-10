@@ -138,7 +138,25 @@ func (s *wcaSession) SetVolume(v float32) error {
 		return errRefreshSessions
 	}
 
-	s.logger.Debugw("Adjusting session volume", "to", fmt.Sprintf("%.2f", v))
+	//s.logger.Debugw("Adjusting session volume", "to", fmt.Sprintf("%.2f", v))
+
+	return nil
+}
+
+func (s *wcaSession) GetMute() bool {
+	var muted bool
+	if err := s.volume.GetMute(&muted); err != nil {
+		s.logger.Warnw("Failed to get mute state", "error", err)
+		return false
+	}
+	return muted
+}
+
+func (s *wcaSession) SetMute(m bool) error {
+	if err := s.volume.SetMute(m, s.eventCtx); err != nil {
+		s.logger.Warnw("Failed to set mute state", "error", err)
+		return fmt.Errorf("set mute: %w", err)
+	}
 
 	return nil
 }
@@ -171,15 +189,32 @@ func (s *masterSession) SetVolume(v float32) error {
 	}
 
 	if err := s.volume.SetMasterVolumeLevelScalar(v, s.eventCtx); err != nil {
-		s.logger.Warnw("Failed to set session volume",
+		s.logger.Warnw("Failed to set master volume",
 			"error", err,
 			"volume", v)
 
-		return fmt.Errorf("adjust session volume: %w", err)
+		return fmt.Errorf("adjust master volume: %w", err)
 	}
 
-	s.logger.Debugw("Adjusting session volume", "to", fmt.Sprintf("%.2f", v))
+	s.logger.Debugw("Adjusting master volume", "to", fmt.Sprintf("%.2f", v))
 
+	return nil
+}
+
+func (s *masterSession) GetMute() bool {
+	var muted bool
+	if err := s.volume.GetMute(&muted); err != nil {
+		s.logger.Warnw("Failed to get mute state", "error", err)
+		return false
+	}
+	return muted
+}
+
+func (s *masterSession) SetMute(m bool) error {
+	if err := s.volume.SetMute(m, s.eventCtx); err != nil {
+		s.logger.Warnw("Failed to set mute state", "error", err)
+		return err
+	}
 	return nil
 }
 

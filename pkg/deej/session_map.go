@@ -182,6 +182,10 @@ func (m *sessionMap) sessionMapped(session Session) bool {
 		return true
 	}
 
+	if funk.ContainsString(m.deej.config.IgnoreUnmapped, session.Key()) {
+		return true // Treat ignored sessions as "mapped" so they won't show up in unmapped list
+	}
+
 	matchFound := false
 
 	// look through the actual mappings
@@ -247,10 +251,37 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 
 			// iterate all matching sessions and adjust the volume of each one
 			for _, session := range sessions {
-				if session.GetVolume() != event.PercentValue {
-					if err := session.SetVolume(event.PercentValue); err != nil {
+
+				switch event.Command {
+				case "=":
+					// Ignore this command (don't change volume)
+				case "+":
+					newVolume := session.GetVolume() + 0.01
+					if newVolume > 1.0 {
+						newVolume = 1.0
+					}
+					if err := session.SetVolume(newVolume); err != nil {
 						m.logger.Warnw("Failed to set target session volume", "error", err)
 						adjustmentFailed = true
+					}
+				case "-":
+					newVolume := session.GetVolume() - 0.01
+					if newVolume < 0 {
+						newVolume = 0
+					}
+					if err := session.SetVolume(newVolume); err != nil {
+						m.logger.Warnw("Failed to set target session volume", "error", err)
+						adjustmentFailed = true
+					}
+				case "^":
+					session.SetMute(!session.GetMute())
+				default:
+
+					if session.GetVolume() != event.PercentValue {
+						if err := session.SetVolume(event.PercentValue); err != nil {
+							m.logger.Warnw("Failed to set target session volume", "error", err)
+							adjustmentFailed = true
+						}
 					}
 				}
 			}

@@ -46,9 +46,10 @@ type SerialIO struct {
 type SliderMoveEvent struct {
 	SliderID     int
 	PercentValue float32
+	Command      string
 }
 
-var expectedLinePattern = regexp.MustCompile(`^\d{1,4}(\|\d{1,4})*\r\n$`)
+var expectedLinePattern = regexp.MustCompile(`^(\d{1,4}|[=\+\^\-])(\|(\d{1,4}|[=\+\^\-]))*\r\n$`)
 
 // NewSerialIO creates a SerialIO instance that uses the provided deej
 // instance's connection info to establish communications with the arduino chip
@@ -186,6 +187,9 @@ func (sio *SerialIO) close(logger *zap.SugaredLogger) {
 }
 
 func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
+
+	logger.Infow("Got line", "line", line)
+
 	if !expectedLinePattern.MatchString(line) {
 		return
 	}
@@ -215,9 +219,29 @@ func (sio *SerialIO) processSliderValues(logger *zap.SugaredLogger, splitLine []
 	moveEvents := []SliderMoveEvent{}
 
 	for sliderIdx, stringValue := range splitLine {
+
+		// Ignore if no change
+		if stringValue == "=" {
+			continue
+		}
+
+		// if the value is a special character, handle it
+		if stringValue == "+" || stringValue == "-" || stringValue == "^" {
+			moveEvents = append(moveEvents, SliderMoveEvent{
+				SliderID:     sliderIdx,
+				PercentValue: 1.0,
+				Command:      stringValue,
+			})
+
+			if sio.deej.Verbose() {
+				logger.Debugw("Command received", "event", moveEvents[len(moveEvents)-1])
+			}
+			continue
+		}
+
 		number, _ := strconv.Atoi(stringValue)
 
-		if sliderIdx == 0 && number > 1023 {
+		if sliderIdx == 0 && number > 100 {
 			logger.Debugw("Got malformed line from serial, ignoring", "line", strings.Join(splitLine, "|"))
 			return moveEvents
 		}
@@ -229,6 +253,7 @@ func (sio *SerialIO) processSliderValues(logger *zap.SugaredLogger, splitLine []
 			moveEvents = append(moveEvents, SliderMoveEvent{
 				SliderID:     sliderIdx,
 				PercentValue: normalizedScalar,
+				Command:      "Slider",
 			})
 
 			if sio.deej.Verbose() {
@@ -241,7 +266,7 @@ func (sio *SerialIO) processSliderValues(logger *zap.SugaredLogger, splitLine []
 }
 
 func (sio *SerialIO) calculateNormalizedValue(rawValue int) float32 {
-	dirtyFloat := float32(rawValue) / 1023.0
+	dirtyFloat := float32(rawValue) / 100.0
 	normalizedScalar := util.NormalizeScalar(dirtyFloat)
 
 	if sio.deej.config.InvertSliders {
@@ -327,4 +352,18 @@ func (sio *SerialIO) startReading() {
 			}
 		}
 	}()
+}
+
+func (sio *SerialIO) SendToArduino(message string) error {
+	if !sio.connected || sio.conn == nil {
+		return errors.New("serial not connected")
+	}
+
+	_, err := sio.conn.Write([]byte(message))
+	if err != nil {
+		sio.logger.Warnw("Failed to write to Arduino", "error", err)
+		return err
+	}
+
+	return nil
 }
