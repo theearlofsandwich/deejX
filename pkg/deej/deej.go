@@ -131,7 +131,7 @@ func (d *Deej) startMasterVolumeMonitor() {
 
 	go func() {
 		const (
-			lowFreqInterval  = 200 * time.Millisecond
+			lowFreqInterval  = 10 * time.Millisecond
 			highFreqInterval = 10 * time.Millisecond
 			stableThreshold  = 100 // how many stable cycles before returning to low freq
 		)
@@ -201,6 +201,27 @@ func (d *Deej) startMasterVolumeMonitor() {
 	}()
 }
 
+func (d *Deej) SendInitialMasterVolume() {
+	sessions, ok := d.sessions.get(masterSessionName)
+	if !ok || len(sessions) == 0 {
+		return
+	}
+
+	master := sessions[0]
+	currentVolume := master.GetVolume()
+	currentMute := master.GetMute()
+
+	volumePercent := int(currentVolume * 100)
+	muteState := 0
+	if currentMute {
+		muteState = 1
+	}
+
+	message := fmt.Sprintf("<!%d|%d>", muteState, volumePercent)
+	d.logger.Infow("Sending initial master volume to serial", "serial", message)
+	d.serial.SendToArduino(message)
+}
+
 // SetVersion causes deej to add a version string to its tray menu if called before Initialize
 func (d *Deej) SetVersion(version string) {
 	d.version = version
@@ -264,6 +285,7 @@ func (d *Deej) run() {
 		d.startMasterVolumeMonitor()
 		d.startKeepAliveMessageSender()
 		d.sendSliderNamesToArduino()
+		d.SendInitialMasterVolume()
 	}()
 
 	// wait until stopped (gracefully)

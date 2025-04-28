@@ -256,7 +256,11 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 				case "=":
 					// Ignore this command (don't change volume)
 				case "+":
-					newVolume := session.GetVolume() + 0.01
+					m.logger.Debugw("Increasing volume")
+					newVolume := session.GetVolume() + 0.02
+
+					m.logger.Debugw("Current volume is", "vol", fmt.Sprintf("%.2f", newVolume))
+
 					if newVolume > 1.0 {
 						newVolume = 1.0
 					}
@@ -265,7 +269,8 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 						adjustmentFailed = true
 					}
 				case "-":
-					newVolume := session.GetVolume() - 0.01
+					m.logger.Debugw("Decreasing volume")
+					newVolume := session.GetVolume() - 0.02
 					if newVolume < 0 {
 						newVolume = 0
 					}
@@ -276,7 +281,6 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 				case "^":
 					session.SetMute(!session.GetMute())
 				default:
-
 					if session.GetVolume() != event.PercentValue {
 						if err := session.SetVolume(event.PercentValue); err != nil {
 							m.logger.Warnw("Failed to set target session volume", "error", err)

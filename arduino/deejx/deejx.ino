@@ -3,17 +3,19 @@
 #include <Adafruit_SSD1306.h>
 #include <ResponsiveAnalogRead.h>
 #include <avr/wdt.h>
+#include <RotaryEncoder.h>
+#include <OneButton.h>
 
 // Configuration constants
 #define CONFIG_NUM_SLIDERS 3
 #define CONFIG_BAUD_RATE 9600
-#define CONFIG_ANALOG_THRESHOLD 15
+#define CONFIG_ANALOG_THRESHOLD 5
 #define CONFIG_KEEPALIVE_TIMEOUT 10000
 
 // Pin definitions
-#define PIN_ENCODER_CLK 2
-#define PIN_ENCODER_DT 3
-#define PIN_ENCODER_SW 4
+#define RE_PIN_IN1 2
+#define RE_PIN_IN2 3
+#define RE_SWITCH 4
 
 // Display configuration
 #define DISPLAY_WIDTH 128
@@ -40,6 +42,9 @@ char receivedChars[SERIAL_BUFFER_SIZE];
 char tempChars[SERIAL_BUFFER_SIZE];
 boolean newData = false;
 unsigned long keepAlive = 0;
+
+RotaryEncoder *encoder = nullptr;
+OneButton button(RE_SWITCH, true);
 
 struct DeejState {
     // Encoder state
@@ -96,7 +101,14 @@ ResponsiveAnalogRead analogReaders[CONFIG_NUM_SLIDERS] = {
     ResponsiveAnalogRead(A2, true),
 };
 
+void checkPosition()
+{
+  encoder->tick(); // just call tick() to check the state.
+}
+
 void setup() {
+    Wire.begin();
+
     // Initialize watchdog timer
     wdt_disable();
     wdt_enable(WDTO_1S);
@@ -109,12 +121,12 @@ void setup() {
         analogReaders[i].setActivityThreshold(CONFIG_ANALOG_THRESHOLD);
     }
     
-    // Initialize encoder pins
-    pinMode(PIN_ENCODER_CLK, INPUT);
-    pinMode(PIN_ENCODER_DT, INPUT);
-    pinMode(PIN_ENCODER_SW, INPUT_PULLUP);
-    
-    attachInterrupt(digitalPinToInterrupt(PIN_ENCODER_CLK), readEncoderTurn, FALLING);
+    button.attachClick(RESwitchClicked);
+    encoder = new RotaryEncoder(RE_PIN_IN1, RE_PIN_IN2, RotaryEncoder::LatchMode::TWO03);
+
+    // register interrupt routine
+    attachInterrupt(digitalPinToInterrupt(RE_PIN_IN1), checkPosition, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(RE_PIN_IN2), checkPosition, CHANGE);
     
     // Initialize displays
     for (int i = 0; i < 4; i++) {
@@ -135,6 +147,9 @@ void loop() {
         parseReceivedData();
         newData = false;
     }
+
+    encoder->tick(); // just call tick() to check the state.
+    button.tick();
     
     handleEncoder();
     updateSliderValues();
@@ -163,41 +178,29 @@ void loop() {
 }
 
 void handleEncoder() {
-    int btnState = digitalRead(PIN_ENCODER_SW);
-    unsigned long currentTime = millis();
-    
-    if (btnState == LOW && 
-        state.lastButtonState == HIGH && 
-        (currentTime - state.lastButtonPress) > DeejState::DEBOUNCE_DELAY) {
-        
-        sprintf(outputBuffer, "^|%d|%d", 
-            state.analogSliderValues[0], 
-            state.analogSliderValues[1]);
-        Serial.println(outputBuffer);
-        state.dataChanged = true;
-        state.lastButtonPress = currentTime;
-    }
-    state.lastButtonState = btnState;
-}
-
-void readEncoderTurn() {
-  int newClk = digitalRead(PIN_ENCODER_CLK);
-  
-  if (newClk != state.lastClk) {
-      int dtValue = digitalRead(PIN_ENCODER_DT);
-      char command = (newClk == LOW && dtValue == HIGH) ? '+' : '-';
-      
-      if (command == '+' || command == '-') {
-          sprintf(outputBuffer, "%c|%d|%d", 
+    static int pos = 0;
+    int newPos = encoder->getPosition();
+    if (pos != newPos) {
+        char command = (int)(encoder->getDirection()) > 0 ? '-' : '+';
+        sprintf(outputBuffer, "%c|%d|%d|%d", 
               command,
               state.analogSliderValues[0], 
-              state.analogSliderValues[1]);
-          Serial.println(outputBuffer);
-          state.dataChanged = true;
-      }
-  }
-  state.lastClk = newClk;
+              state.analogSliderValues[1],
+              state.analogSliderValues[2]);
+        Serial.println(outputBuffer);
+
+        pos = newPos;
+    }
 }
+
+void RESwitchClicked() {
+    sprintf(outputBuffer, "^|%d|%d|%d", 
+            state.analogSliderValues[0], 
+            state.analogSliderValues[1],
+            state.analogSliderValues[2]);
+    Serial.println(outputBuffer);
+}
+
 
 bool initDisplay(int displayId) {
     if (displayId >= 4) {
@@ -226,6 +229,7 @@ void updateDisplay(int displayId) {
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(5, 0);
+
 
     switch (displayId) {
         case 0:
@@ -279,9 +283,10 @@ void updateSliderValues() {
 }
 
 void sendSliderValues() {
-    sprintf(outputBuffer, "=|%d|%d", 
+    sprintf(outputBuffer, "=|%d|%d|%d", 
         state.analogSliderValues[0], 
-        state.analogSliderValues[1]);
+        state.analogSliderValues[1],
+        state.analogSliderValues[2]);
     Serial.println(outputBuffer);
 }
 
@@ -382,8 +387,9 @@ void parseReceivedData() {
 }
 
 void tcaselect(uint8_t i) {
-    if (i > 7) return;
-    Wire.beginTransmission(TCAADDR);
-    Wire.write(1 << i);
-    Wire.endTransmission();
+  if (i > 7) return;
+ 
+  Wire.beginTransmission(TCAADDR);
+  Wire.write(1 << i);
+  Wire.endTransmission();  
 }

@@ -11,18 +11,19 @@ slider_mapping:
   0: master
   1: deej.unmapped
   2: discord.exe
+  3: brave.exe
 
-ignore_unmapped:
-  - rambox.exe
+#ignore_unmapped:
+  #- rambox.exe
 
 # Slider name must be separated by | and less than 20 characters each
-slider_names: Master|Chrome|Unbound|Browser
+slider_names: Master|Unbound|Discord|Browser
 
 # set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
 invert_sliders: false
 
 # settings for connecting to the arduino board
-com_port: COM4
+com_port: COM5
 baud_rate: 9600
 
 # adjust the amount of signal noise reduction depending on your hardware quality
