@@ -222,7 +222,7 @@ func (sio *SerialIO) processSliderValues(logger *zap.SugaredLogger, splitLine []
 
 	for sliderIdx, stringValue := range splitLine {
 
-		// Ignore if no change
+		// skip to other values if first value is "="
 		if stringValue == "=" {
 			continue
 		}
@@ -243,24 +243,25 @@ func (sio *SerialIO) processSliderValues(logger *zap.SugaredLogger, splitLine []
 
 		number, _ := strconv.Atoi(stringValue)
 
+		// Error if master volume > 100
 		if sliderIdx == 0 && number > 100 {
 			logger.Debugw("Got malformed line from serial, ignoring", "line", strings.Join(splitLine, "|"))
 			return moveEvents
 		}
 
+		// Convert percentage to 0 - 1
 		normalizedScalar := sio.calculateNormalizedValue(number)
 
-		if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
-			sio.currentSliderPercentValues[sliderIdx] = normalizedScalar
-			moveEvents = append(moveEvents, SliderMoveEvent{
-				SliderID:     sliderIdx,
-				PercentValue: normalizedScalar,
-				Command:      "Slider",
-			})
+		//if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
+		sio.currentSliderPercentValues[sliderIdx] = normalizedScalar
+		moveEvents = append(moveEvents, SliderMoveEvent{
+			SliderID:     sliderIdx,
+			PercentValue: normalizedScalar,
+			Command:      "=",
+		})
 
-			if sio.deej.Verbose() {
-				logger.Debugw("Slider moved", "event", moveEvents[len(moveEvents)-1])
-			}
+		if sio.deej.Verbose() {
+			logger.Debugw("Slider moved", "event", moveEvents[len(moveEvents)-1])
 		}
 	}
 

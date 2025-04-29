@@ -224,6 +224,8 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 		m.refreshSessions(true)
 	}
 
+	//m.logger.Debugw("Encoder event", "command", event.Command)
+
 	// Special handling for encoder events (+ and -)
 	if event.Command == "+" || event.Command == "-" {
 		// Calculate time since last encoder event
@@ -308,8 +310,6 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 				// iterate all matching sessions and adjust the volume of each one
 				for _, session := range sessions {
 					switch event.Command {
-					case "=":
-						// Ignore this command (don't change volume)
 					case "+":
 						m.logger.Debugw("Increasing volume", "delta", volumeDelta)
 						newVolume := session.GetVolume() + volumeDelta
