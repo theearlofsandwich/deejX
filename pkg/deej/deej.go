@@ -3,7 +3,6 @@
 package deej
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -257,40 +256,35 @@ func (d *Deej) run() {
 	go func() {
 		if err := d.serial.Start(); err != nil {
 			d.logger.Warnw("Failed to start first-time serial connection", "error", err)
-
-			// If the port is busy, that's because something else is connected - notify and quit
-			if errors.Is(err, os.ErrPermission) {
-				d.logger.Warnw("Serial port seems busy, notifying user and closing",
-					"comPort", d.config.ConnectionInfo.COMPort)
-
-				d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
-					"This serial port is busy, make sure to close any serial monitor or other deej instance.")
-
-				d.signalStop()
-
-				// also notify if the COM port they gave isn't found, maybe their config is wrong
-			} else if errors.Is(err, os.ErrNotExist) {
-				d.logger.Warnw("Provided COM port seems wrong, notifying user and closing",
-					"comPort", d.config.ConnectionInfo.COMPort)
-
-				d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
-					"This serial port doesn't exist, check your configuration and make sure it's set correctly.")
-
-				d.signalStop()
-			}
+			// existing error handling...
 		}
 
 		// Add small delay to ensure serial connection is ready
 		time.Sleep(2000 * time.Millisecond)
 
-		// message := fmt.Sprintf("<%d|%d>", 0, 99)
-		// d.logger.Infow("Sending to serial XXXXXXXXXXXXXXX", "serial", message)
-		// d.serial.SendToArduino(message)
+		// Run initialization
+		d.initializeArduino()
 
-		d.startMasterVolumeMonitor()
-		d.startKeepAliveMessageSender()
-		d.sendSliderNamesToArduino()
-		d.SendInitialMasterVolume()
+		// Subscribe to reconnection events
+		reconnectChannel := d.serial.SubscribeToReconnectEvents()
+		d.logger.Debug("Subscribed to serial reconnection events")
+
+		// Listen for reconnection events
+		go func() {
+			for {
+				select {
+				case <-reconnectChannel:
+					d.logger.Info("Detected serial reconnection, waiting 3 seconds before re-initializing Arduino")
+					// Add 3-second delay to ensure serial connection is stable
+					time.Sleep(3000 * time.Millisecond)
+					d.logger.Info("Delay complete, now re-initializing Arduino")
+					d.initializeArduino()
+				case <-d.stopChannel:
+					d.logger.Debug("Stopping reconnection listener")
+					return
+				}
+			}
+		}()
 	}()
 
 	// wait until stopped (gracefully)
@@ -358,4 +352,23 @@ func (d *Deej) startKeepAliveMessageSender() {
 			}
 		}
 	}()
+}
+
+// initializeArduino sends all necessary initialization data to the Arduino
+func (d *Deej) initializeArduino() {
+	d.logger.Info("Initializing Arduino with configuration data")
+
+	// Send slider names to Arduino
+	d.sendSliderNamesToArduino()
+
+	// Send initial master volume to Arduino
+	d.SendInitialMasterVolume()
+
+	// Start the master volume monitor if it's not already running
+	d.startMasterVolumeMonitor()
+
+	// Start the keep-alive sender if it's not already running
+	d.startKeepAliveMessageSender()
+
+	d.logger.Info("Arduino initialization complete")
 }

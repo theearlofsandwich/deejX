@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,6 +33,7 @@ type SerialIO struct {
 	currentSliderPercentValues []float32
 
 	sliderMoveConsumers []chan SliderMoveEvent
+	reconnectNotifiers  []chan bool
 
 	reconnectTicker *time.Ticker
 	stopTicker      chan bool
@@ -103,6 +103,8 @@ func (sio *SerialIO) Start() error {
 					sio.logger.Debug("Attempting to reconnect...")
 					if err := sio.connect(); err != nil {
 						sio.logger.Warnw("Failed to reconnect", "error", err)
+					} else {
+						sio.logger.Info("Reconnection successful")
 					}
 				}
 			case <-sio.stopTicker:
@@ -321,34 +323,54 @@ func (sio *SerialIO) connect() error {
 	sio.retryCount = 0
 	sio.connected = true
 	sio.startReading()
+
+	// Notify about successful reconnection - always notify regardless of retry count
+	sio.logger.Info("Serial connection established successfully")
+
+	// Notify all subscribers about reconnection
+	for _, ch := range sio.reconnectNotifiers {
+		select {
+		case ch <- true:
+			sio.logger.Debug("Sent reconnection notification to subscriber")
+		default:
+			sio.logger.Warn("Reconnection notification channel buffer full, skipping")
+		}
+	}
+
 	return nil
 }
 
 func (sio *SerialIO) startReading() {
-	connReader := bufio.NewReader(sio.conn)
-	readTimeout := time.Second * 5
+	sio.logger.Debug("Starting to read from serial")
 
+	// read lines from the connection until we're stopped
 	go func() {
+		reader := bufio.NewReader(sio.conn)
+		lineLogger := sio.logger.Named("line")
+
 		for {
 			select {
 			case <-sio.stopChannel:
+				sio.logger.Debug("Got stop signal, closing connection")
 				sio.close(sio.logger)
 				return
 			default:
-				// Set read deadline
-				if timeout, ok := sio.conn.(interface{ SetReadDeadline(time.Time) error }); ok {
-					_ = timeout.SetReadDeadline(time.Now().Add(readTimeout))
-				}
-
-				line, err := connReader.ReadString('\n')
+				line, err := reader.ReadString('\n')
 				if err != nil {
-					if err != io.EOF && !errors.Is(err, os.ErrDeadlineExceeded) {
-						sio.logger.Warnw("Failed to read line", "error", err)
+					// Only log if we're still connected (avoid spam during shutdown)
+					if sio.connected {
+						sio.logger.Warnw("Failed to read from serial", "error", err)
+						sio.connected = false
+
+						// Close the connection to ensure clean state
+						if sio.conn != nil {
+							sio.close(sio.logger)
+						}
 					}
-					sio.connected = false
 					return
 				}
-				sio.handleLine(sio.logger, line)
+
+				sio.handleLine(lineLogger, line)
 			}
 		}
 	}()
@@ -366,4 +388,30 @@ func (sio *SerialIO) SendToArduino(message string) error {
 	}
 
 	return nil
+}
+
+// notifyReconnected signals that a reconnection was successful
+func (sio *SerialIO) notifyReconnected() {
+	// Only notify if this wasn't the first connection
+	if sio.retryCount > 0 {
+		sio.logger.Info("Serial connection re-established successfully")
+
+		// Notify subscribers about reconnection
+		for _, ch := range sio.reconnectNotifiers {
+			select {
+			case ch <- true:
+				// Successfully sent notification
+			default:
+				// Channel buffer full, skip notification
+			}
+		}
+	}
+}
+
+// SubscribeToReconnectEvents returns a buffered channel that receives
+// a notification when serial connection is re-established
+func (sio *SerialIO) SubscribeToReconnectEvents() chan bool {
+	ch := make(chan bool, 1) // Buffer of 1 to prevent blocking
+	sio.reconnectNotifiers = append(sio.reconnectNotifiers, ch)
+	return ch
 }
