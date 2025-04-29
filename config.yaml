@@ -17,7 +17,11 @@ slider_mapping:
   #- rambox.exe
 
 # Slider name must be separated by | and less than 20 characters each
-slider_names: Master|Unbound|Discord|Browser
+slider_names:
+  0: MASTER
+  1: ALL
+  2: DISCORD
+  3: BROWSER
 
 # set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
 invert_sliders: false
@@ -29,3 +33,4 @@ baud_rate: 9600
 # adjust the amount of signal noise reduction depending on your hardware quality
 # supported values are "low" (excellent hardware), "default" (regular hardware) or "high" (bad, noisy hardware)
 noise_reduction: default
+

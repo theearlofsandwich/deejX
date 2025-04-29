@@ -3,6 +3,7 @@ package deej
 import (
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,6 +55,7 @@ const (
 	configKeySliderMapping       = "slider_mapping"
 	configKeyIgnoreUnmapped      = "ignore_unmapped"
 	configKeySliderNames         = "slider_names"
+	configKeySliderNamesMap      = "slider_names"
 	configKeyInvertSliders       = "invert_sliders"
 	configKeyCOMPort             = "com_port"
 	configKeyBaudRate            = "baud_rate"
@@ -244,7 +246,35 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 		cc.ConnectionInfo.BaudRate = defaultBaudRate
 	}
 
-	cc.SliderNames = cc.userConfig.GetString(configKeySliderNames)
+	// Check if slider_names is a string or a map
+	if cc.userConfig.IsSet(configKeySliderNames) && cc.userConfig.GetString(configKeySliderNames) != "" {
+		// Old format: slider_names is a string
+		cc.SliderNames = cc.userConfig.GetString(configKeySliderNames)
+	} else if cc.userConfig.IsSet(configKeySliderNamesMap) {
+		// New format: slider_names is a map
+		sliderNamesMap := cc.userConfig.GetStringMapString(configKeySliderNamesMap)
+
+		// Create a slice to hold names in order
+		maxSliderIdx := -1
+		for sliderIdxStr := range sliderNamesMap {
+			sliderIdx, _ := strconv.Atoi(sliderIdxStr)
+			if sliderIdx > maxSliderIdx {
+				maxSliderIdx = sliderIdx
+			}
+		}
+
+		// Create a slice with enough capacity
+		sliderNames := make([]string, maxSliderIdx+1)
+
+		// Fill the slice with names from the map
+		for sliderIdxStr, name := range sliderNamesMap {
+			sliderIdx, _ := strconv.Atoi(sliderIdxStr)
+			sliderNames[sliderIdx] = name
+		}
+
+		// Join the names with pipe separator
+		cc.SliderNames = strings.Join(sliderNames, "|")
+	}
 
 	cc.InvertSliders = cc.userConfig.GetBool(configKeyInvertSliders)
 	cc.NoiseReductionLevel = cc.userConfig.GetString(configKeyNoiseReductionLevel)

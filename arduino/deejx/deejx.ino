@@ -9,7 +9,7 @@
 // Configuration constants
 #define CONFIG_NUM_SLIDERS 3
 #define CONFIG_BAUD_RATE 9600
-#define CONFIG_ANALOG_THRESHOLD 5
+#define CONFIG_ANALOG_THRESHOLD 9
 #define CONFIG_KEEPALIVE_TIMEOUT 10000
 
 // Pin definitions
@@ -225,6 +225,8 @@ bool initDisplay(int displayId) {
 void updateDisplay(int displayId) {
     tcaselect(displayId);
     display.clearDisplay();
+
+    display.dim(true);
     
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);

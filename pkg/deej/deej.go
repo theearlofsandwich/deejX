@@ -121,6 +121,11 @@ func (d *Deej) Initialize() error {
 }
 
 func (d *Deej) sendSliderNamesToArduino() {
+	if d.config.SliderNames == "" {
+		d.logger.Debug("No slider names configured, skipping send to Arduino")
+		return
+	}
+
 	message := fmt.Sprintf("<^%s>", d.config.SliderNames)
 	d.logger.Infow("Sending to serial", "serial", message)
 	d.serial.SendToArduino(message)
