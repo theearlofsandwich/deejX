@@ -23,6 +23,14 @@ slider_names:
   2: DISCORD
   3: BROWSER
 
+# Optional: set maximum volume limits for each slider (values are percentages from 1-100)
+# When a slider is at 100%, the volume will be set to the specified percentage
+slider_max_volume:
+  0: 100  # Master volume is always 100%
+  1: 50   # All unmapped apps limited to 40%
+  2: 50   # Discord volume limited to 40%
+  3: 30   # Browser volume limited to 20%
+
 # set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
 invert_sliders: false
 

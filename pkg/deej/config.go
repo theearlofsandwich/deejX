@@ -17,8 +17,9 @@ import (
 // CanonicalConfig provides application-wide access to configuration fields,
 // as well as loading/file watching logic for deej's configuration file
 type CanonicalConfig struct {
-	SliderMapping  *sliderMap
-	IgnoreUnmapped []string
+	SliderMapping   *sliderMap
+	IgnoreUnmapped  []string
+	SliderMaxVolume map[int]int // Add this field to store max volume per slider
 
 	ConnectionInfo struct {
 		COMPort  string
@@ -60,6 +61,7 @@ const (
 	configKeyCOMPort             = "com_port"
 	configKeyBaudRate            = "baud_rate"
 	configKeyNoiseReductionLevel = "noise_reduction"
+	configKeySliderMaxVolume     = "slider_max_volume"
 
 	defaultCOMPort  = "COM4"
 	defaultBaudRate = 9600
@@ -278,6 +280,59 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 
 	cc.InvertSliders = cc.userConfig.GetBool(configKeyInvertSliders)
 	cc.NoiseReductionLevel = cc.userConfig.GetString(configKeyNoiseReductionLevel)
+
+	// Initialize the SliderMaxVolume map
+	cc.SliderMaxVolume = make(map[int]int)
+
+	// Check if slider_max_volume is set in the config
+	if cc.userConfig.IsSet(configKeySliderMaxVolume) {
+		// Get the map from the config
+		maxVolumeMap := cc.userConfig.GetStringMap(configKeySliderMaxVolume)
+
+		// Convert the map keys to integers and populate our SliderMaxVolume map
+		for sliderIdxStr, maxVolumeValue := range maxVolumeMap {
+			sliderIdx, err := strconv.Atoi(sliderIdxStr)
+			if err != nil {
+				cc.logger.Warnw("Invalid slider index in slider_max_volume",
+					"index", sliderIdxStr, "error", err)
+				continue
+			}
+
+			// Convert the value to an integer
+			maxVolume := 100 // Default to 100%
+
+			switch v := maxVolumeValue.(type) {
+			case int:
+				maxVolume = v
+			case float64:
+				maxVolume = int(v)
+			case string:
+				parsedValue, err := strconv.Atoi(v)
+				if err != nil {
+					cc.logger.Warnw("Invalid max volume value",
+						"slider", sliderIdx, "value", v, "error", err)
+					continue
+				}
+				maxVolume = parsedValue
+			default:
+				cc.logger.Warnw("Unsupported max volume value type",
+					"slider", sliderIdx, "type", fmt.Sprintf("%T", v))
+				continue
+			}
+
+			// Ensure the max volume is between 1 and 100
+			if maxVolume < 1 {
+				cc.logger.Warnw("Max volume too low, setting to 1", "slider", sliderIdx)
+				maxVolume = 1
+			} else if maxVolume > 100 {
+				cc.logger.Warnw("Max volume too high, setting to 100", "slider", sliderIdx)
+				maxVolume = 100
+			}
+
+			cc.SliderMaxVolume[sliderIdx] = maxVolume
+			cc.logger.Debugw("Set max volume for slider", "slider", sliderIdx, "maxVolume", maxVolume)
+		}
+	}
 
 	cc.logger.Debug("Populated config fields from vipers")
 

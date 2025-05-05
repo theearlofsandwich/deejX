@@ -276,85 +276,91 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 	targetFound := false
 	adjustmentFailed := false
 
-	// Handle special commands
-	if event.Command == "+" || event.Command == "-" || event.Command == "^" || event.Command == "=" {
-		// Calculate volume delta based on encoder speed (only for + and -)
-		volumeDelta := float32(0.01) // Default small change
-		if event.Command == "+" || event.Command == "-" {
-			// Base volume delta on encoder speed
-			baseVolumeDelta := float32(0.01)
-			maxVolumeDelta := float32(0.1)
-			volumeDelta = baseVolumeDelta + (maxVolumeDelta-baseVolumeDelta)*m.encoderSpeed
-		}
+	// Calculate volume delta based on encoder speed (only for + and -)
+	volumeDelta := float32(0.01) // Default small change
+	if event.Command == "+" || event.Command == "-" {
+		// Base volume delta on encoder speed
+		baseVolumeDelta := float32(0.01)
+		maxVolumeDelta := float32(0.1)
+		volumeDelta = baseVolumeDelta + (maxVolumeDelta-baseVolumeDelta)*m.encoderSpeed
+	}
 
-		// for each possible target for this slider...
-		for _, target := range targets {
+	// for each possible target for this slider...
+	for _, target := range targets {
 
-			// resolve the target name by cleaning it up and applying any special transformations.
-			// depending on the transformation applied, this can result in more than one target name
-			resolvedTargets := m.resolveTarget(target)
+		// resolve the target name by cleaning it up and applying any special transformations.
+		// depending on the transformation applied, this can result in more than one target name
+		resolvedTargets := m.resolveTarget(target)
 
-			// for each resolved target...
-			for _, resolvedTarget := range resolvedTargets {
+		// for each resolved target...
+		for _, resolvedTarget := range resolvedTargets {
 
-				// check the map for matching sessions
-				sessions, ok := m.get(resolvedTarget)
+			// check the map for matching sessions
+			sessions, ok := m.get(resolvedTarget)
 
-				// no sessions matching this target - move on
-				if !ok {
-					continue
-				}
+			// no sessions matching this target - move on
+			if !ok {
+				continue
+			}
 
-				targetFound = true
+			targetFound = true
 
-				// iterate all matching sessions and adjust the volume of each one
-				for _, session := range sessions {
-					switch event.Command {
-					case "+":
-						m.logger.Debugw("Increasing volume", "delta", volumeDelta)
-						newVolume := session.GetVolume() + volumeDelta
-						if newVolume > 1.0 {
-							newVolume = 1.0
+			// iterate all matching sessions and adjust the volume of each one
+			for _, session := range sessions {
+				switch event.Command {
+				case "+":
+					m.logger.Debugw("Increasing volume", "delta", volumeDelta)
+					newVolume := session.GetVolume() + volumeDelta
+					if newVolume > 1.0 {
+						newVolume = 1.0
+					}
+
+					// If we're increasing volume from zero, make sure to unmute
+					if session.GetVolume() == 0 && session.GetMute() {
+						if err := session.SetMute(false); err != nil {
+							m.logger.Warnw("Failed to unmute session", "error", err)
+						} else {
+							m.logger.Debugw("Unmuted session when increasing from zero volume")
 						}
+					}
 
-						// If we're increasing volume from zero, make sure to unmute
-						if session.GetVolume() == 0 && session.GetMute() {
-							if err := session.SetMute(false); err != nil {
-								m.logger.Warnw("Failed to unmute session", "error", err)
-							} else {
-								m.logger.Debugw("Unmuted session when increasing from zero volume")
-							}
-						}
+					if err := session.SetVolume(newVolume); err != nil {
+						m.logger.Warnw("Failed to set target session volume", "error", err)
+						adjustmentFailed = true
+					}
+				case "-":
+					m.logger.Debugw("Decreasing volume", "delta", volumeDelta)
+					newVolume := session.GetVolume() - volumeDelta
+					if newVolume < 0 {
+						newVolume = 0
+					}
+					if err := session.SetVolume(newVolume); err != nil {
+						m.logger.Warnw("Failed to set target session volume", "error", err)
+						adjustmentFailed = true
+					}
+				case "^":
+					session.SetMute(!session.GetMute())
+				default:
+					percentValue := event.PercentValue
+					if maxVolume, ok := m.deej.config.SliderMaxVolume[event.SliderID]; ok {
+						// Scale the volume to the configured max
+						percentValue = percentValue * (float32(maxVolume) / 100.0)
+						m.logger.Debugw("Applied max volume limit",
+							"slider", event.SliderID,
+							"maxVolume", maxVolume,
+							"originalValue", event.PercentValue,
+							"scaledValue", percentValue)
+					}
 
-						if err := session.SetVolume(newVolume); err != nil {
+					if session.GetVolume() != percentValue {
+						if err := session.SetVolume(percentValue); err != nil {
 							m.logger.Warnw("Failed to set target session volume", "error", err)
 							adjustmentFailed = true
-						}
-					case "-":
-						m.logger.Debugw("Decreasing volume", "delta", volumeDelta)
-						newVolume := session.GetVolume() - volumeDelta
-						if newVolume < 0 {
-							newVolume = 0
-						}
-						if err := session.SetVolume(newVolume); err != nil {
-							m.logger.Warnw("Failed to set target session volume", "error", err)
-							adjustmentFailed = true
-						}
-					case "^":
-						session.SetMute(!session.GetMute())
-					default:
-						if session.GetVolume() != event.PercentValue {
-							if err := session.SetVolume(event.PercentValue); err != nil {
-								m.logger.Warnw("Failed to set target session volume", "error", err)
-								adjustmentFailed = true
-							}
 						}
 					}
 				}
 			}
 		}
-	} else {
-		// Handle normal slider movement (existing code)...
 	}
 
 	// if we still haven't found a target or the volume adjustment failed, maybe look for the target again.

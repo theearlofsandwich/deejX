@@ -226,7 +226,7 @@ void updateDisplay(int displayId) {
     tcaselect(displayId);
     display.clearDisplay();
 
-    display.dim(true);
+    //display.dim(true);
     
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
