@@ -48,6 +48,12 @@ func NewDeej(logger *zap.SugaredLogger, verbose bool) (*Deej, error) {
 		return nil, fmt.Errorf("create new Config: %w", err)
 	}
 
+	// Load the config before creating other components
+	if err := config.Load(); err != nil {
+		logger.Errorw("Failed to load config during initialization", "error", err)
+		return nil, fmt.Errorf("load config during init: %w", err)
+	}
+
 	d := &Deej{
 		logger:      logger,
 		notifier:    notifier,
@@ -87,13 +93,8 @@ func NewDeej(logger *zap.SugaredLogger, verbose bool) (*Deej, error) {
 func (d *Deej) Initialize() error {
 	d.logger.Debug("Initializing")
 
-	// load the config for the first time
-	if err := d.config.Load(); err != nil {
-		d.logger.Errorw("Failed to load config during initialization", "error", err)
-		return fmt.Errorf("load config during init: %w", err)
-	}
-
-	// initialize the session map
+	// Config is already loaded in NewDeej, so we don't need to load it again
+	// Just initialize the session map
 	if err := d.sessions.initialize(); err != nil {
 		d.logger.Errorw("Failed to initialize session map", "error", err)
 		return fmt.Errorf("init session map: %w", err)
@@ -101,17 +102,11 @@ func (d *Deej) Initialize() error {
 
 	d.setupInterruptHandler()
 
-	// d.startMasterVolumeMonitor()
-	// d.sendSliderNamesToArduino()
-
 	// decide whether to run with/without tray
 	if _, noTraySet := os.LookupEnv(envNoTray); noTraySet {
-
 		d.logger.Debugw("Running without tray icon", "reason", "envvar set")
-
 		// run in main thread while waiting on ctrl+C
 		d.run()
-
 	} else {
 		d.initializeTray(d.run)
 	}

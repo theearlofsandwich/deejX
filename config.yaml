@@ -9,9 +9,9 @@
 # important: slider indexes start at 0, regardless of which analog pins you're using!
 slider_mapping:
   0: master
-  1: deej.unmapped
+  1: brave.exe
   2: discord.exe
-  3: brave.exe
+  3: deej.unmapped
 
 #ignore_unmapped:
   #- rambox.exe
@@ -19,9 +19,9 @@ slider_mapping:
 # Slider name must be separated by | and less than 20 characters each
 slider_names:
   0: MASTER
-  1: ALL
+  1: BROWSER
   2: DISCORD
-  3: BROWSER
+  3: ALL
 
 # Optional: set maximum volume limits for each slider (values are percentages from 1-100)
 # When a slider is at 100%, the volume will be set to the specified percentage

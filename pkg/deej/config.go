@@ -237,6 +237,12 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 
 	// get the rest of the config fields - viper saves us a lot of effort here
 	cc.ConnectionInfo.COMPort = cc.userConfig.GetString(configKeyCOMPort)
+	if cc.ConnectionInfo.COMPort == "" {
+		cc.logger.Warnw("Empty COM port specified, using default value",
+			"key", configKeyCOMPort,
+			"defaultValue", defaultCOMPort)
+		cc.ConnectionInfo.COMPort = defaultCOMPort
+	}
 
 	cc.ConnectionInfo.BaudRate = cc.userConfig.GetInt(configKeyBaudRate)
 	if cc.ConnectionInfo.BaudRate <= 0 {
@@ -247,6 +253,10 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 
 		cc.ConnectionInfo.BaudRate = defaultBaudRate
 	}
+
+	cc.logger.Debugw("Populated connection info",
+		"comPort", cc.ConnectionInfo.COMPort,
+		"baudRate", cc.ConnectionInfo.BaudRate)
 
 	// Check if slider_names is a string or a map
 	if cc.userConfig.IsSet(configKeySliderNames) && cc.userConfig.GetString(configKeySliderNames) != "" {

@@ -4,13 +4,12 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/jacobsa/go-serial/serial"
+	"go.bug.st/serial"
 	"go.uber.org/zap"
 
 	"github.com/omriharel/deej/pkg/deej/util"
@@ -26,8 +25,7 @@ type SerialIO struct {
 
 	stopChannel chan bool
 	connected   bool
-	connOptions serial.OpenOptions
-	conn        io.ReadWriteCloser
+	conn        serial.Port
 
 	lastKnownNumSliders        int
 	currentSliderPercentValues []float32
@@ -56,6 +54,22 @@ var expectedLinePattern = regexp.MustCompile(`^(\d{1,4}|[=\+\^\-])(\|(\d{1,4}|[=
 func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 	logger = logger.Named("serial")
 
+	// Log the connection info from the config
+	logger.Debugw("Connection info from config",
+		"comPort", deej.config.ConnectionInfo.COMPort,
+		"baudRate", deej.config.ConnectionInfo.BaudRate)
+
+	// Check if the values are empty or zero
+	if deej.config.ConnectionInfo.COMPort == "" {
+		logger.Warn("COM port is empty in config, using default COM4")
+		deej.config.ConnectionInfo.COMPort = "COM5"
+	}
+
+	if deej.config.ConnectionInfo.BaudRate == 0 {
+		logger.Warn("Baud rate is zero in config, using default 9600")
+		deej.config.ConnectionInfo.BaudRate = 9600
+	}
+
 	sio := &SerialIO{
 		deej:                deej,
 		logger:              logger,
@@ -66,14 +80,14 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 		reconnectTicker:     time.NewTicker(30 * time.Second),
 		stopTicker:          make(chan bool),
 		maxRetries:          5,
-		connOptions: serial.OpenOptions{
-			DataBits:        8,
-			StopBits:        1,
-			MinimumReadSize: 1,
-		},
+		comPort:             deej.config.ConnectionInfo.COMPort,
+		baudRate:            uint(deej.config.ConnectionInfo.BaudRate),
 	}
 
-	logger.Debug("Created serial i/o instance")
+	// Log the values after setting them
+	logger.Debugw("Created serial i/o instance",
+		"comPort", sio.comPort,
+		"baudRate", sio.baudRate)
 
 	// respond to config changes
 	sio.setupOnConfigReload()
@@ -157,8 +171,8 @@ func (sio *SerialIO) setupOnConfigReload() {
 				}()
 
 				// if connection params have changed, attempt to stop and start the connection
-				if sio.deej.config.ConnectionInfo.COMPort != sio.connOptions.PortName ||
-					uint(sio.deej.config.ConnectionInfo.BaudRate) != sio.connOptions.BaudRate {
+				if sio.deej.config.ConnectionInfo.COMPort != sio.comPort ||
+					uint(sio.deej.config.ConnectionInfo.BaudRate) != sio.baudRate {
 
 					sio.logger.Info("Detected change in connection parameters, attempting to renew connection")
 					sio.Stop()
@@ -290,91 +304,62 @@ func (sio *SerialIO) deliverMoveEvents(moveEvents []SliderMoveEvent) {
 }
 
 func (sio *SerialIO) connect() error {
-	if sio.connected {
-		return nil
+	sio.logger.Debugw("Attempting to connect", "comPort", sio.comPort, "baudRate", sio.baudRate)
+
+	// Configure serial port
+	mode := &serial.Mode{
+		BaudRate: int(sio.baudRate),
+		DataBits: 8,
+		Parity:   serial.NoParity,
+		StopBits: serial.OneStopBit,
 	}
 
-	// Update connection options
-	sio.connOptions.PortName = sio.deej.config.ConnectionInfo.COMPort
-	sio.connOptions.BaudRate = uint(sio.deej.config.ConnectionInfo.BaudRate)
-
-	var err error
-	sio.conn, err = serial.Open(sio.connOptions)
+	// Open the port
+	conn, err := serial.Open(sio.comPort, mode)
 	if err != nil {
-		sio.retryCount++
-		backoff := time.Duration(sio.retryCount) * time.Second
-
-		if sio.retryCount > sio.maxRetries {
-			sio.logger.Errorw("Max connection retries reached",
-				"attempts", sio.retryCount,
-				"error", err)
-			return fmt.Errorf("max retries reached: %w", err)
-		}
-
-		sio.logger.Warnw("Connection failed, will retry",
-			"attempt", sio.retryCount,
-			"backoff", backoff,
-			"error", err)
-
-		time.Sleep(backoff)
-		return sio.connect()
+		return fmt.Errorf("failed to open serial port: %w", err)
 	}
 
-	// Reset retry count on successful connection
-	sio.retryCount = 0
+	sio.conn = conn
 	sio.connected = true
-	sio.startReading()
 
-	// Notify about successful reconnection - always notify regardless of retry count
-	sio.logger.Info("Serial connection established successfully")
-
-	// Notify all subscribers about reconnection
-	for _, ch := range sio.reconnectNotifiers {
-		select {
-		case ch <- true:
-			sio.logger.Debug("Sent reconnection notification to subscriber")
-		default:
-			sio.logger.Warn("Reconnection notification channel buffer full, skipping")
-		}
-	}
+	// Start reading routine
+	go sio.readFromSerial()
 
 	return nil
 }
 
-func (sio *SerialIO) startReading() {
-	sio.logger.Debug("Starting to read from serial")
+func (sio *SerialIO) readFromSerial() {
+	logger := sio.logger.Named("read")
+	reader := bufio.NewReader(sio.conn)
 
-	// read lines from the connection until we're stopped
-	go func() {
-		reader := bufio.NewReader(sio.conn)
-		lineLogger := sio.logger.Named("line")
+	defer func() {
+		sio.connected = false
+		logger.Debug("Serial connection closed, notifying subscribers")
 
-		for {
-			select {
-			case <-sio.stopChannel:
-				sio.logger.Debug("Got stop signal, closing connection")
-				sio.close(sio.logger)
-				return
-			default:
-				line, err := reader.ReadString('\n')
-				if err != nil {
-					// Only log if we're still connected (avoid spam during shutdown)
-					if sio.connected {
-						sio.logger.Warnw("Failed to read from serial", "error", err)
-						sio.connected = false
-
-						// Close the connection to ensure clean state
-						if sio.conn != nil {
-							sio.close(sio.logger)
-						}
-					}
-					return
-				}
-
-				sio.handleLine(lineLogger, line)
-			}
+		// Notify reconnect subscribers
+		for _, notifier := range sio.reconnectNotifiers {
+			notifier <- false
 		}
 	}()
+
+	for {
+		select {
+		case <-sio.stopChannel:
+			logger.Debug("Received stop signal, closing connection")
+			sio.close(logger)
+			return
+		default:
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				logger.Warnw("Failed to read line from serial", "error", err)
+				sio.close(logger)
+				return
+			}
+
+			sio.handleLine(logger, line)
+		}
+	}
 }
 
 func (sio *SerialIO) SendToArduino(message string) error {
